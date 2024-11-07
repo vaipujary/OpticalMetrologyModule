@@ -1,16 +1,56 @@
-# This is a sample Python script.
+import cv2
+import OpticalMetrologyModule
+import time
+import logging
+import random
 
-# Press ⌃R to execute it or replace it with your code.
-# Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings.
+# Capture video from the default camera (camera index 0)
+cap = cv2.VideoCapture(0)
+optical_metrology_module = OpticalMetrologyModule()
 
+# Get the experiment duration from the user (minimum 10 minutes)
+experiment_duration = 10
+start_time = time.time()
 
-def print_hi(name):
-    # Use a breakpoint in the code line below to debug your script.
-    print(f'Hi, {name}')  # Press ⌘F8 to toggle the breakpoint.
+# Assign random colors to each microsphere for trajectory visualization
+colors = {}  # Dictionary to store colors for each microsphere ID
 
+while True:
+    # Check if the experiment duration has been reached
+    elapsed_time = time.time() - start_time
+    if elapsed_time >= experiment_duration:
+        logging.info("Experiment time completed.")
+        break
 
-# Press the green button in the gutter to run the script.
-if __name__ == '__main__':
-    print_hi('PyCharm')
+    # Read a frame from the video capture
+    ret, frame = cap.read()
+    if not ret:
+        logging.error("Failed to capture image.")
+        break
+# Calculate velocities of tracked features
+    velocities = optical_metrology_module.calculate_velocity(frame)
+    for velocity_data in velocities:
+        # Draw the microsphere ID, velocity, and size on the frame
+        x, y = velocity_data["position"][0]
+        cv2.putText(frame, f"ID: {velocity_data['id']}, Vel: {velocity_data['velocity']:.2f}, Size: {velocity_data['size']:.2f}", (int(x), int(y)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
 
-# See PyCharm help at https://www.jetbrains.com/help/pycharm/
+        # Draw the trajectory of each microsphere
+        microsphere_id = velocity_data["id"]
+        if microsphere_id not in colors:
+            # Assign a random color if not already assigned
+            colors[microsphere_id] = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+        trajectory = optical_metrology_module.trajectories[microsphere_id]
+        for j in range(1, len(trajectory)):
+            cv2.line(frame, (int(trajectory[j - 1][0]), int(trajectory[j - 1][1])),
+                     (int(trajectory[j][0]), int(trajectory[j][1])), colors[microsphere_id], 2)
+
+    # Display the current frame
+    cv2.imshow("Frame", frame)
+    # Exit loop if 'q' key is pressed
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Release the video capture and close all OpenCV windows
+cap.release()
+cv2.destroyAllWindows()

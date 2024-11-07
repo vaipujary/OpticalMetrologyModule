@@ -9,6 +9,8 @@ class OpticalMetrologyModule:
         self.prev_gray = None
         self.prev_features = None
         self.microsphere_ids = []
+        self.microsphere_sizes = {}  # Dictionary to store the size of each microsphere
+        self.trajectories = {}  # Dictionary to store trajectories of each microsphere
         # Parameters for Lucas-Kanade optical flow
         self.lk_params = dict(winSize=(15, 15), maxLevel=2,
                               criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
@@ -20,6 +22,12 @@ class OpticalMetrologyModule:
         self.prev_features = cv2.goodFeaturesToTrack(gray, maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
         # Assign unique IDs to each detected microsphere
         self.microsphere_ids = list(range(len(self.prev_features)))
+        # Calculate the size of each microsphere (assuming circular features)
+        for i, feature in enumerate(self.prev_features):
+            x, y = feature.ravel()
+            size = self.calculate_size(gray, (x, y))
+            self.microsphere_sizes[i] = size
+            self.trajectories[i] = [(x, y)]  # Initialize trajectory with the first position
         # Store the grayscale image for future use
         self.prev_gray = gray
 
