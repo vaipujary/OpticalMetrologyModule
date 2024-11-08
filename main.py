@@ -4,8 +4,18 @@ import time
 import logging
 import random
 
+
+# Set up logging configuration
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 # Capture video from the default camera (camera index 0)
-cap = cv2.VideoCapture(0)
+# cap = cv2.VideoCapture(0)
+cam = cv2.VideoCapture('/Sample Videos/3.mp4')
+frame_width = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
+frame_height = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
+fourcc = cv2.VideoWriter.fourcc(*'mp4v')
+out = cv2.VideoWriter('output.mp4', fourcc, 20.0, (frame_width, frame_height))
+
 optical_metrology_module = OpticalMetrologyModule()
 
 # Get the experiment duration from the user (minimum 10 minutes)
@@ -23,11 +33,13 @@ while True:
         break
 
     # Read a frame from the video capture
-    ret, frame = cap.read()
+    ret, frame = cam.read()
     if not ret:
         logging.error("Failed to capture image.")
         break
-# Calculate velocities of tracked features
+
+    out.write(frame)
+    # Calculate velocities of tracked features
     velocities = optical_metrology_module.calculate_velocity(frame)
     for velocity_data in velocities:
         # Draw the microsphere ID, velocity, and size on the frame
@@ -52,5 +64,6 @@ while True:
         break
 
 # Release the video capture and close all OpenCV windows
-cap.release()
+cam.release()
+out.release()
 cv2.destroyAllWindows()
