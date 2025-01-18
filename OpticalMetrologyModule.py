@@ -7,6 +7,8 @@ import pims
 import skimage as ski
 
 
+# 355-425 um
+
 class OpticalMetrologyModule:
     def __init__(self, debug=False):
         # Initialize previous frame and features to None
@@ -29,14 +31,14 @@ class OpticalMetrologyModule:
         if self.debug:
             plt.imshow(current_frame)
 
-        f = tp.locate(current_frame, 11, invert=False)
+        # f = tp.locate(current_frame, 11, invert=False)
 
-        if self.debug:
-            f.head()
-            tp.annotate(f, current_frame)
+        # if self.debug:
+        #    f.head()
+        #    tp.annotate(f, current_frame)
 
         # Detect good features to track using Shi-Tomasi corner detection
-        self.prev_features = cv2.goodFeaturesToTrack(gray, maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
+        self.prev_features = cv2.goodFeaturesToTrack(gray, maxCorners=500, qualityLevel=0.1, minDistance=5, blockSize=7)
         # Assign unique IDs to each detected microsphere
         self.microsphere_ids = [f"{self.frame_number}-{i}" for i in range(len(self.prev_features))]
         # Calculate the size of each microsphere (assuming circular features)
@@ -58,14 +60,15 @@ class OpticalMetrologyModule:
         x, y = int(position[0]), int(position[1])
         # Image segmentation: Otsu's binarization by setting flag to cv2.THRESH_OTSU
         # Optimal threshold value is calculated automatically
-        otsu_threshold, threshold_image = cv2.threshold(gray_frame, 127, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        otsu_threshold, threshold_image = cv2.threshold(gray_frame, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         print("Obtained Otsu threshold: ", otsu_threshold)
-        # Find contours in the thresholded image
+        # Find contours in the thresholded image and store them in a list.
         contours, hierarchy = cv2.findContours(threshold_image, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
-            if cv2.pointPolygonTest(contour, (x, y), False) >= 0:
+            # if cv2.pointPolygonTest(contour, (x, y), False) >= 0:
+            if cv2.contourArea(contour) > 10:
                 # Draw the contour around the detected microsphere
-                cv2.drawContours(current_frame, [contour], -1, (0, 255, 0), 2)
+                cv2.drawContours(current_frame, [contour], -1, (255, 0, 0), 3)
                 # Calculate the radius of the minimum enclosing circle
                 (_, _), radius = cv2.minEnclosingCircle(contour)
                 return radius * 2  # Diameter of the microsphere
@@ -102,7 +105,7 @@ class OpticalMetrologyModule:
                 velocity = np.sqrt(dx ** 2 + dy ** 2)
                 microsphere_id = self.microsphere_ids[i]
                 microsphere_data.append({"id": microsphere_id, "velocity": velocity, "position": curr,
-                                   "size": self.microsphere_sizes[microsphere_id]})
+                                         "size": self.microsphere_sizes[microsphere_id]})
                 updated_features.append(curr)
                 updated_ids.append(microsphere_id)
                 # Update trajectory with the new position
