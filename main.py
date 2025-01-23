@@ -194,6 +194,24 @@ class RealTimeVideoProcessor:
     def __init__(self, ui_video_label):
         self.ui_video_label = ui_video_label
         self.cam = cv2.VideoCapture('Test Data/Videos/3.mp4')
+        #
+        # if not self.cam.isOpened():
+        #     print("Error: Could not open the ThorLabs camera.")
+        # else:
+        #     print("ThorLabs camera is open. Press 'q' to quit.")
+        #     # Set desired FPS
+        #     desired_fps = 30  # Replace with the desired FPS
+        #     success = self.cam.set(cv2.CAP_PROP_FPS, desired_fps)
+        #
+        #     if success:
+        #         print(f"Successfully set FPS to {desired_fps}.")
+        #     else:
+        #         print("Failed to set FPS. The camera may not support this setting.")
+        #
+        #     # Get and print the actual FPS to verify
+        #     current_fps = self.cam.get(cv2.CAP_PROP_FPS)
+        #     print(f"Camera is running at {current_fps} FPS.")
+        # cv2.VideoCapture('Test Data/Videos/3.mp4')
         self.mask = None
         self.particle_colors = []
         self.trajectories = []
