@@ -6,7 +6,6 @@ import trackpy as tp
 import pims
 import skimage as ski
 
-
 # 355-425 um
 
 class OpticalMetrologyModule:

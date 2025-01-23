@@ -1,0 +1,163 @@
+{
+	"QMainWindow":[
+		{
+			"tittle":"Optical Metrology Module",
+			"icon":":/images/OMM logo.png",
+			"frameless": true,
+			"transluscentBg": true,
+			"sizeGrip": "sizeGrip",
+			"navigation":[
+				{
+					"minimize":"minimizeBtn",
+					"close": "closeBtn",
+					"restore":[
+						{
+							"buttonName": "maximizeBtn",
+							"normalIcon": ":/icons/icons/square.svg",
+							"maximizedIcon": ":/icons/icons/copy.svg"
+						}
+					],
+					"moveWindow": "headerContainer",
+					"tittleBar": "headerContainer"
+				}
+			]
+		}
+	],
+	"QCustomSlideMenu": [{
+		"name": "leftMenuContainer",
+		"defaultSize": [{
+			"width": 45,
+			"height": "parent"
+		}],
+		"collapsedSize": [{
+			"width": 45,
+			"height": "parent"
+		}],
+		"expandedSize": [{
+			"width": 150,
+			"height": "parent"
+		}],
+		"toggleButton": [{
+			"buttonName": "menuBtn",
+			"icons": [{
+				"whenMenuIsCollapsed": ":/icons/icons/align-justify.svg",
+				"whenMenuIsExpanded": ":/icons/icons/chevron-left.svg"
+			}]
+		}],
+		"menuTransitionAnimation": [{
+			"animationDuration": 500,
+			"animationEasingCurve": "Linear"
+		}]
+	},
+		{
+		"name": "centerMenuContainer",
+		"defaultSize": [{
+			"width": 0,
+			"height": "parent"
+		}],
+		"collapsedSize": [{
+			"width": 0,
+			"height": "parent"
+		}],
+		"expandedSize": [{
+			"width": 200,
+			"height": "parent"
+		}],
+		"menuTransitionAnimation": [{
+			"animationDuration": 500,
+			"animationEasingCurve": "Linear"
+		}]
+	},
+		{
+		"name": "rightMenuContainer",
+		"defaultSize": [{
+			"width": 0,
+			"height": "auto"
+		}],
+		"collapsedSize": [{
+			"width": 0,
+			"height": "auto"
+		}],
+		"expandedSize": [{
+			"width": 200,
+			"height": "auto"
+		}],
+		"menuTransitionAnimation": [{
+			"animationDuration": 500,
+			"animationEasingCurve": "Linear"
+		}]
+	},
+		{
+		"name": "popupNotificationContainer",
+		"defaultSize": [{
+			"width": 0,
+			"height": "auto"
+		}],
+		"collapsedSize": [{
+			"width": 0,
+			"height": "auto"
+		}],
+		"expandedSize": [{
+			"width": 500,
+			"height": 100
+		}],
+		"menuTransitionAnimation": [{
+			"animationDuration": 500,
+			"animationEasingCurve": "Linear"
+		}],
+			"floatPosition": [
+			{
+				"relativeTo": "centralwidget",
+				"position": "center-center",
+				"shadow":[
+					{
+						"color": "#000",
+						"blurRadius": 20,
+						"xOffset": 0,
+						"yOffset": 0
+					}
+				]
+			}
+		],
+			"toggleButton": [{
+			"buttonName": "notificationBtn"
+		}]
+		}
+	],
+	"QCustomQStackedWidget":[
+		{
+			"name": "rightMenuPages",
+			"navigation":[
+				{
+				"navigationButtons":[
+					{
+						"experimentControlsBtn": "page",
+						"moreMenuBtn": "page_2"
+					}
+				]
+				}
+			]
+		}],
+	"QPushButtonGroup": [{
+		"Buttons": [
+			"homeBtn",
+			"dataAnalysisBtn",
+			"cameraBtn"
+		],
+		"Style": [{
+			"Active": "background-color: #1f232a;",
+			"NotActive": ""
+		}]
+	},
+	{
+		"Buttons": [
+			"settingsBtn",
+			"infoBtn",
+			"helpBtn"
+		],
+		"Style": [{
+			"Active": "background-color: #2c313c;",
+			"NotActive": ""
+		}]
+	}]
+}
