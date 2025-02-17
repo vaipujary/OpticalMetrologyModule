@@ -1,17 +1,53 @@
 import os
+import json
 import cv2
 import logging
 from OpticalMetrologyModule import OpticalMetrologyModule
 
+def load_pixels_per_mm(config_path="../config.json"):
+    """
+    Load the pixels_per_mm value from the config.json file.
+
+    :param config_path: Path to the configuration file.
+    :return: pixels_per_mm value (float) or None if not found.
+    """
+    if not os.path.exists(config_path):
+        logging.error(f"Configuration file not found: {config_path}")
+        return None
+
+    try:
+        with open(config_path, "r") as config_file:
+            config = json.load(config_file)
+            return config.get("scaling_factor", {}).get("pixels_per_mm")
+    except Exception as e:
+        logging.error(f"Failed to read configuration file: {e}")
+        return None
+
+def setup_logging():
+    """Setup logging with file clearing."""
+    log_file = 'microsphere_size_test_log.txt'
+    # Clear the log file
+    with open(log_file, 'w') as f:
+        f.write('')
+    # Setup logging configuration
+    logging.basicConfig(
+        filename=log_file,
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+
 def main():
-    # Set up logging configuration.
-    logging.basicConfig(filename='microsphere_size_test_log.txt', level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    # Clear and setup logging first
+    setup_logging()
 
     # Create an instance of OpticalMetrologyModule
-    optical_metrology_module = OpticalMetrologyModule()
+    optical_metrology_module = OpticalMetrologyModule(debug=False)
 
     # Specify the directory containing the test images
-    image_directory = "../Test Data/Images"  # Replace with the path to your dust particle images
+    image_directory = "../Test Data/Images/"
+
+    # Define pixel-to-mm ratio for size conversion (use calibrated value)
+    pixel_mm_ratio = load_pixels_per_mm()
 
     # Get a list of image files in the directory
     image_files = [f for f in os.listdir(image_directory) if f.endswith(('.png', '.jpg', '.jpeg'))]
@@ -25,19 +61,22 @@ def main():
             logging.error(f"Failed to load image: {image_file}")
             continue
 
+        frame_resized = optical_metrology_module.resize_frame(frame)
+
         # Process the image to get microsphere information
-        optical_metrology_module.initialize_features(frame, False)
+        optical_metrology_module.initialize_features(frame_resized, False)
 
         # Log the size information for each microsphere detected in the image
-        for microsphere_id, size in optical_metrology_module.microsphere_sizes.items():
-            logging.info(f"Image: {image_file}, Microsphere ID: {microsphere_id}, Size: {size:.2f} pixels")
+        for microsphere_id, size_in_pixels in optical_metrology_module.microsphere_sizes.items():
+            # Convert size from pixels to millimeters
+            size_in_mm = size_in_pixels / pixel_mm_ratio
+            logging.info(f"Image: {image_file}, Microsphere ID: {microsphere_id}, Size: {size_in_mm:.2f} mm")
+            print(f"Image: {image_file}, Microsphere ID: {microsphere_id}, Size: {size_in_mm:.2f} mm")
 
         # Optionally, display the image with detected features
-        for feature in optical_metrology_module.prev_features:
-            x, y = feature.ravel()
-            cv2.circle(frame, (int(x), int(y)), 3, (0, 0, 255), -1)
+        frame_with_ids = optical_metrology_module.annotate_frame_with_ids(frame_resized)
+        cv2.imshow("Detected Particles", frame_with_ids)
 
-        cv2.imshow("Dust Particles", frame)
         # Exit loop if 'q' key is pressed
         if cv2.waitKey(0) & 0xFF == ord('q'):
             break
