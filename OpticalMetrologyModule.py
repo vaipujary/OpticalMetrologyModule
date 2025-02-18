@@ -1,5 +1,8 @@
 import cv2
 import numpy as np
+import csv
+import os
+import json
 import matplotlib.pyplot as plt
 import logging
 import trackpy as tp
@@ -9,19 +12,76 @@ import skimage as ski
 # 355-425 um
 
 class OpticalMetrologyModule:
-    def __init__(self, debug=False):
+    def __init__(self, debug=False, output_csv="particle_data.csv", config_path=os.path.join(os.path.dirname(__file__), 'config.json'), frame_rate=30, parent_ui=None):
         # Initialize previous frame and features to None
         self.prev_gray = None
         self.prev_features = None
-        self.microsphere_ids = []
+        self.next_particle_id = 1  # Start assigning particle IDs from 1
+        self.microsphere_ids = [] # Uses sequential numeric IDs for particles
         self.microsphere_sizes = {}  # Dictionary to store the size of each microsphere
         self.trajectories = {}  # Dictionary to store trajectories of each microsphere
+        self.microsphere_positions = {}  # Store positions for all particles
+        self.microsphere_velocities = {}  # Store velocities for all particles
+
         self.frame_number = 0  # Keep track of the current frame number
         # Parameters for Lucas-Kanade optical flow
         self.lk_params = dict(winSize=(15, 15), maxLevel=2,
                               criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+        self.csv_file = output_csv  # Path to the output CSV file
+        self.frame_rate = frame_rate  # Frame rate of the video
         self.debug = debug
         self.persistent_debug_frame = None
+        self.parent_ui = parent_ui
+        # Load pixel-to-mm scaling factor from config.json
+        self.scaling_factor = self.load_config(config_path)
+
+        # Initialize CSV file and write the header
+        self.initialize_csv()
+
+    def load_config(self, config_path):
+        """
+        Load the pixel-to-mm scaling factor from the JSON configuration file.
+
+        :param config_path: Path to the configuration JSON file.
+        :return: Pixels-per-mm scaling factor.
+        """
+        if not os.path.exists(config_path):
+            raise FileNotFoundError(f"Configuration file '{config_path}' not found.")
+        with open(config_path, "r") as file:
+            config = json.load(file)
+            return config["scaling_factor"]["pixels_per_mm"]
+
+    def initialize_csv(self):
+        """Initialize the CSV file and write the header."""
+        with open(self.csv_file, mode="w", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow(
+                ["Frame", "Timestamp (s)", "Particle ID", "X (mm)", "Y (mm)", "Size (um)", "Velocity (mm/s)",
+                 "Trajectory (mm)"])
+
+    def log_to_csv(self, frame_number, particle_id, x, y, size, velocity, trajectory):
+        """Log particle data into the CSV file."""
+
+        # Access the state of saveDataCheckBox
+        save_data_enabled = self.parent_ui.saveDataCheckBox.isChecked()
+
+        # Only log data if the checkbox is checked
+        if not save_data_enabled:
+            if self.debug:
+                logging.info("Save Data option is disabled. Skipping CSV logging.")
+            return  # Do nothing if not checked
+
+        timestamp = frame_number / self.frame_rate  # Calculate timestamp in seconds
+
+        # Validate the data before writing
+        if not self.validate_row(frame_number, timestamp, particle_id, x, y, size, velocity, trajectory):
+            if self.debug:
+                logging.warning(f"Invalid data ignored for Particle ID {particle_id} in Frame {frame_number}")
+            return  # Skip invalid data
+
+        with open(self.csv_file, mode="a", newline="") as file:
+            writer = csv.writer(file)
+            writer.writerow([frame_number, timestamp, particle_id, x, y, size, velocity, trajectory])
 
     def resize_frame(self, image, max_width=800, max_height=600):
         """
@@ -109,14 +169,16 @@ class OpticalMetrologyModule:
         #
         # # Convert keypoints to a numpy array for consistency
         # self.prev_features = np.array([kp.pt for kp in keypoints], dtype=np.float32).reshape(-1, 1, 2)
-        #
 
         # Assign unique IDs to each detected microsphere
-        self.microsphere_ids = [f"{self.frame_number}-{i}" for i in range(len(self.prev_features))]
+        self.microsphere_ids = [self.next_particle_id + i for i in range(len(self.prev_features))]
+        self.next_particle_id += len(self.prev_features)  # Increment the ID counter
 
         # Create a debug frame to keep annotations from all detections
         debug_annotated_frame = current_frame.copy()
 
+        # Filter features within bounds
+        frame_height, frame_width = gray.shape[:2]
         # Process each detected feature to calculate its size
         valid_features = []  # List to store features with non-zero sizes
         valid_ids = []  # List to store IDs of features with non-zero sizes
@@ -125,7 +187,7 @@ class OpticalMetrologyModule:
         for i, feature in enumerate(self.prev_features):
             x, y = feature.ravel()
             # Ensure coordinates are within image bounds
-            if 0 <= x < gray.shape[1] and 0 <= y < gray.shape[0]:
+            if 0 <= x < frame_width and 0 <= y < frame_height:
 
                 size = self.calculate_size(gray, self.persistent_debug_frame, (x, y), self.microsphere_ids[i])
 
@@ -191,16 +253,42 @@ class OpticalMetrologyModule:
         cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
         contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        # Get frame dimensions
+        frame_height, frame_width = frame.shape[:2]
+
         for i, contour in enumerate(contours):
+            # Skip contours partially outside the frame
+            if not is_contour_within_bounds(contour, frame_width, frame_height):
+                continue  # Exclude particles outside the frame
+
             if len(contour) >= 5:
                 ellipse = cv2.fitEllipse(contour)
                 (cx, cy), (major_axis, minor_axis), angle = ellipse
                 diameter = (major_axis + minor_axis) / 2
-                microsphere_id = self.microsphere_ids[i] if i < len(self.microsphere_ids) else f"unknown-{i}"
-                cv2.drawContours(frame, [contour], -1, (0, 255, 0), 1)
-                cv2.ellipse(frame, ellipse, (255, 0, 0), 1)
+                # Assign numeric ID if available, else use the index as fallback
+                microsphere_id = self.microsphere_ids[i] if i < len(self.microsphere_ids) else i
+                cv2.drawContours(frame, [contour], -1, (0, 0, 255), 1)
+                cv2.ellipse(frame, ellipse, (0, 255, 0), 1)
                 cv2.putText(frame, str(microsphere_id), (int(cx) + 10, int(cy) - 10),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        # Add trajectory rendering for tracked particles (if `trajectories` exist)
+        for particle_id, trajectory in self.trajectories.items():
+            if len(trajectory) > 1:  # Render only if trajectory has at least two points
+                for j in range(1, len(trajectory)):
+                    # Get consecutive points in the trajectory
+                    x1, y1 = int(trajectory[j - 1][0] * self.scaling_factor), int(
+                        trajectory[j - 1][1] * self.scaling_factor)
+                    x2, y2 = int(trajectory[j][0] * self.scaling_factor), int(
+                        trajectory[j][1] * self.scaling_factor)
+
+                    # Draw trajectory as yellow line
+                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+
+                # Annotate the particle ID at the last known position
+                x_last, y_last = int(trajectory[-1][0] * self.scaling_factor), int(
+                    trajectory[-1][1] * self.scaling_factor)
+                cv2.putText(frame, str(particle_id), (x_last + 10, y_last - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)  # Yellow text for trajectory ID
         return frame
 
     def calculate_size(self, gray_frame, current_frame, position, microsphere_id):
@@ -357,7 +445,209 @@ class OpticalMetrologyModule:
                 return diameter
 
         return None
-        # # Initialize variables for selecting the appropriate contour
+
+    def process_frame_data(self, current_frame):
+        """
+        Process the current frame to calculate velocities and sizes,
+        and write data to the CSV file.
+        """
+        # Increment the frame number
+        self.frame_number += 1
+
+        # If previous frame or features are not initialized, initialize them
+        if self.prev_gray is None or self.prev_features is None:
+            # Initialize tracking features on the first frame
+            self.initialize_features(current_frame, False)
+            return
+
+        # Convert the current frame to grayscale
+        current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+
+        # Calculate optical flow using Lucas-Kanade method
+        current_features, status, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, current_gray, self.prev_features, None,
+                                                                 **self.lk_params)
+
+        updated_features = []
+        updated_ids = []
+        lost_ids = []  # Keep track of particle IDs that are lost
+
+        print(f"Frame {self.frame_number}:")  # Debug output
+
+        # Match previous features to current frame features
+        for i, (prev, curr) in enumerate(zip(self.prev_features, current_features)):
+            if status[i] == 1 and err[i] < 50:  # Status 1 means that the feature point was found in both frames,
+                # and err[i] is within acceptable range
+
+                microsphere_id = self.microsphere_ids[i]
+                x_mm = curr[0][0] / self.scaling_factor  # Convert x-coordinate to mm
+                y_mm = curr[0][1] / self.scaling_factor  # Convert y-coordinate to mm
+
+                # Calculate the displacement in x and y directions
+                dx = curr[0][0] - prev[0][0]
+                dy = curr[0][1] - prev[0][1]
+
+                # Calculate the magnitude of velocity
+                velocity_px_per_frame = np.sqrt(dx ** 2 + dy ** 2)
+
+                # Convert velocity to mm/s
+                velocity_mm_s = (velocity_px_per_frame / self.scaling_factor) * self.frame_rate
+
+                # Update positions and velocities
+                if microsphere_id not in self.microsphere_positions:
+                    self.microsphere_positions[microsphere_id] = []
+                if microsphere_id not in self.microsphere_velocities:
+                    self.microsphere_velocities[microsphere_id] = []
+
+                self.microsphere_positions[microsphere_id].append((x_mm, y_mm))
+                self.microsphere_velocities[microsphere_id].append(velocity_mm_s)
+
+                # Update the trajectory
+                if microsphere_id in self.trajectories:
+                    self.trajectories[microsphere_id].append((x_mm, y_mm))
+                else:
+                    self.trajectories[microsphere_id] = [(x_mm, y_mm)]
+
+                # Log the data to CSV
+                trajectory_mm = [(x / self.scaling_factor, y / self.scaling_factor) for x, y in
+                                 self.trajectories[microsphere_id]]
+                self.log_to_csv(self.frame_number, microsphere_id, x_mm, y_mm,
+                                self.microsphere_sizes.get(microsphere_id, 0), velocity_mm_s, trajectory_mm)
+
+                # Keep track of updated features and IDs
+                updated_features.append(curr)
+                updated_ids.append(microsphere_id)
+            else:
+                # If particle is lost, add its ID to the lost list
+                lost_ids.append(self.microsphere_ids[i])
+
+        # Remove trajectories of lost particles
+        self.remove_lost_particles(lost_ids)
+
+        # Update previous frame and features for the next iteration
+        self.prev_gray = current_gray
+        self.prev_features = np.array(updated_features, dtype=np.float32)
+        self.microsphere_ids = updated_ids
+
+        # Detect new features and add them if they don't overlap with existing ones
+        self.detect_new_particles(current_frame)
+
+    def detect_new_particles(self, current_frame):
+        """
+        Detect new microspheres in the current frame and avoid duplicates.
+        """
+        gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+
+        # Detect new features (good features to track)
+        new_features = cv2.goodFeaturesToTrack(
+            gray,
+            maxCorners=2000,
+            qualityLevel=0.03,
+            minDistance=1,
+            blockSize=3
+        )
+
+        if new_features is not None:
+            for feature in new_features:
+                x, y = feature.ravel()
+                is_duplicate = False
+
+                # Check if this new feature overlaps with an existing one
+                for existing_feature in self.prev_features:
+                    ex, ey = existing_feature.ravel()
+                    if np.sqrt((x - ex) ** 2 + (y - ey) ** 2) < 15:  # Distance threshold for duplicates
+                        is_duplicate = True
+                        break
+
+                if not is_duplicate:
+                    # Generate a new ID for this particle
+                    new_id = self.next_particle_id
+                    self.next_particle_id += 1  # Increment ID counter
+
+                    size = self.calculate_size(gray, self.persistent_debug_frame, (x, y), new_id)
+
+                    # Convert size to microns
+                    size_um = (size / self.scaling_factor) * 1000
+
+                    # Save the new feature
+                    self.prev_features = np.append(self.prev_features, [[x, y]], axis=0)
+                    self.microsphere_ids.append(new_id)
+                    self.microsphere_sizes[new_id] = size
+                    self.trajectories[new_id] = [(x / self.scaling_factor, y / self.scaling_factor)]  # Positions in mm
+
+                    self.microsphere_positions[new_id] = [(x / self.scaling_factor, y / self.scaling_factor)]
+                    self.microsphere_velocities[new_id] = []
+
+                    # Log new particle data to CSV
+                    self.log_to_csv(self.frame_number, new_id, x / self.scaling_factor,
+                                    y / self.scaling_factor, size_um, 0,
+                                    [(x / self.scaling_factor, y / self.scaling_factor)])
+
+    def remove_lost_particles(self, lost_ids):
+        """
+        Remove particles that are no longer detected from trajectories and other tracking dictionaries.
+
+        :param lost_ids: List of particle IDs that are no longer detected.
+        """
+        for particle_id in lost_ids:
+            if particle_id in self.trajectories:
+                del self.trajectories[particle_id]
+            if particle_id in self.microsphere_positions:
+                del self.microsphere_positions[particle_id]
+            if particle_id in self.microsphere_velocities:
+                del self.microsphere_velocities[particle_id]
+            if particle_id in self.microsphere_sizes:
+                del self.microsphere_sizes[particle_id]
+
+    def validate_row(self, frame_number, timestamp, particle_id, x, y, size, velocity, trajectory):
+        """
+        Validate the values to ensure no invalid data is written to the CSV file.
+
+        :param frame_number: Frame number.
+        :param timestamp: Timestamp of the frame (in seconds).
+        :param particle_id: Unique ID of the particle.
+        :param x: X-coordinate in mm.
+        :param y: Y-coordinate in mm.
+        :param size: Size of the particle (in μm).
+        :param velocity: Velocity of the particle (in mm/s).
+        :param trajectory: List of trajectory coordinates (in mm).
+        :return: True if the row is valid, otherwise False.
+        """
+        if frame_number is None or frame_number < 0:
+            return False
+        if timestamp is None or timestamp < 0:
+            return False
+        if particle_id is None or particle_id <= 0:
+            return False
+        if x is None or x <= 0:
+            return False
+        if y is None or y <= 0:
+            return False
+        if size is None or size <= 0:  # Size must be positive
+            return False
+        if velocity is None or velocity < 0:  # Velocity can be zero but not negative
+            return False
+        if not trajectory or not isinstance(trajectory, list):  # Trajectory must be a valid list
+            return False
+
+        # Additional checks can be added as needed
+        return True
+
+
+def is_contour_within_bounds(contour, frame_width, frame_height):
+    """
+    Check if a contour's bounding box is entirely within the frame boundaries.
+
+    :param contour: Single contour to check.
+    :param frame_width: Width of the frame.
+    :param frame_height: Height of the frame.
+    :return: True if the bounding box of the contour is fully inside bounds, otherwise False.
+    """
+    x, y, w, h = cv2.boundingRect(contour)
+
+    # Ensure no part of the bounding box is outside the frame dimensions
+    return x >= 0 and y >= 0 and (x + w) <= frame_width and (y + h) <= frame_height
+
+# # Initialize variables for selecting the appropriate contour
         # selected_contour = None
         # min_distance = float("inf")
         #
@@ -514,103 +804,3 @@ class OpticalMetrologyModule:
         #         (_, _), radius = cv2.minEnclosingCircle(contour)
         #         return radius * 2  # Diameter of the microsphere
         #     return 0
-
-    def process_frame_data(self, current_frame):
-        # Increment the frame number
-        self.frame_number += 1
-
-        # If previous frame or features are not initialized, initialize them
-        if self.prev_gray is None or self.prev_features is None:
-            # Initialize tracking features on the first frame
-            self.initialize_features(current_frame, False)
-            return []
-
-        # Convert the current frame to grayscale
-        current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-
-        # Calculate optical flow using Lucas-Kanade method
-        current_features, status, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, current_gray, self.prev_features, None,
-                                                                 **self.lk_params)
-
-        # Calculate velocities for each tracked feature
-        microsphere_data = []
-        updated_features = []
-        updated_ids = []
-
-        # Match previous features to current frame features
-        for i, (prev, curr) in enumerate(zip(self.prev_features, current_features)):
-            if status[i] == 1 and err[i] < 50:  # Status 1 means that the feature point was found in both frames,
-                # and err[i] is within acceptable range
-                # Calculate the displacement in x and y directions
-                dx = curr[0][0] - prev[0][0]
-                dy = curr[0][1] - prev[0][1]
-
-                # Calculate the magnitude of velocity
-                velocity = np.sqrt(dx ** 2 + dy ** 2)
-                microsphere_id = self.microsphere_ids[i]
-
-                microsphere_data.append({"id": microsphere_id,
-                                         "velocity": velocity,
-                                         "position": curr,
-                                         "size": self.microsphere_sizes[microsphere_id]})
-
-                # Update trajectory with the new position
-                self.trajectories[microsphere_id].append((curr[0][0], curr[0][1]))
-
-                updated_features.append(curr)
-                updated_ids.append(microsphere_id)
-
-        # Update previous frame and features for the next iteration
-        self.prev_gray = current_gray
-        self.prev_features = np.array(updated_features, dtype=np.float32)
-        self.microsphere_ids = updated_ids
-
-        # Detect new features and add them if they don't overlap with existing ones
-        self.detect_new_particles(current_frame)
-
-        return microsphere_data
-
-    def detect_new_particles(self, current_frame):
-        """
-        Detect new microspheres in the current frame and avoid duplicates.
-        """
-        gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-
-        # Detect new features (good features to track)
-        new_features = cv2.goodFeaturesToTrack(
-            gray,
-            maxCorners=2000,
-            qualityLevel=0.03,
-            minDistance=1,
-            blockSize=3
-        )
-
-        if new_features is not None:
-            for feature in new_features:
-                x, y = feature.ravel()
-                is_duplicate = False
-
-                # Check if this new feature overlaps with an existing one
-                for existing_feature in self.prev_features:
-                    ex, ey = existing_feature.ravel()
-                    if np.sqrt((x - ex) ** 2 + (y - ey) ** 2) < 15:  # Distance threshold for duplicates
-                        is_duplicate = True
-                        break
-
-                if not is_duplicate:
-                    # Generate a new ID for this particle
-                    new_id = f"{self.frame_number}-new-{len(self.microsphere_ids)}"
-                    size = self.calculate_size(gray, self.persistent_debug_frame, (x, y), new_id)
-
-                    # Save the new feature, ID, and size
-                    self.prev_features = np.append(self.prev_features, [[x, y]], axis=0)
-                    self.microsphere_ids.append(new_id)
-                    self.microsphere_sizes[new_id] = size
-                    self.trajectories[new_id] = [(x, y)]
-
-                    # Annotate the new particle (optional for debug)
-                    if self.debug:
-                        cv2.circle(self.persistent_debug_frame, (int(x), int(y)), 5, (255, 0, 0), -1)
-                        cv2.putText(self.persistent_debug_frame, new_id, (int(x) + 10, int(y) - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-

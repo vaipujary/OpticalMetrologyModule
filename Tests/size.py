@@ -69,9 +69,9 @@ def main():
         # Log the size information for each microsphere detected in the image
         for microsphere_id, size_in_pixels in optical_metrology_module.microsphere_sizes.items():
             # Convert size from pixels to millimeters
-            size_in_mm = size_in_pixels / pixel_mm_ratio
-            logging.info(f"Image: {image_file}, Microsphere ID: {microsphere_id}, Size: {size_in_mm:.2f} mm")
-            print(f"Image: {image_file}, Microsphere ID: {microsphere_id}, Size: {size_in_mm:.2f} mm")
+            size_in_um = (size_in_pixels / pixel_mm_ratio)*1000
+            logging.info(f"Image: {image_file}, Microsphere ID: {microsphere_id}, Size: {size_in_um:.2f} um")
+            print(f"Image: {image_file}, Microsphere ID: {microsphere_id}, Size: {size_in_um:.2f} um")
 
         # Optionally, display the image with detected features
         frame_with_ids = optical_metrology_module.annotate_frame_with_ids(frame_resized)

@@ -66,15 +66,15 @@ class MainWindow(QMainWindow):
         self.camera_dialog = VideoCalibrationDialog(self)
         self.graph_window = GraphWindow(self)
         self.calibration_dialog = None
-        self.optical_metrology_module = OpticalMetrologyModule(debug=False)
+        self.optical_metrology_module = OpticalMetrologyModule(debug=False, parent_ui=self.ui)
 
         # Initialize variables for size and velocity graph bins
         self.size_bins = np.linspace(0, 100, 21)  # Modify ranges according to expected sizes
         self.velocity_bins = np.linspace(0, 50, 21)  # Modify ranges according to expected velocities
 
         # Video capture and output settings
-        self.cam = cv2.VideoCapture('Test Data/Videos/3.mp4')  # Provide the path to your video
-        self.fps = int(self.cam.get(cv2.CAP_PROP_FPS))
+        #self.cam = cv2.VideoCapture('Test Data/Videos/3.mp4')  # Provide the path to your video
+        #self.fps = int(self.cam.get(cv2.CAP_PROP_FPS))
 
         # Apply JSON stylesheet
         loadJsonStyle(self, self.ui)
@@ -108,6 +108,8 @@ class MainWindow(QMainWindow):
         self.ui.cameraBtn.clicked.connect(self.open_video_calibration_dialog)
         self.ui.graphBtn.clicked.connect(self.open_graph_window)
 
+        self.saveDataCheckBox.stateChanged.connect(self.on_save_data_checkbox_changed)
+
     def open_video_calibration_dialog(self):
         # Show the dialog (modal, blocks interaction with the main window)
         self.camera_dialog.show()
@@ -116,13 +118,19 @@ class MainWindow(QMainWindow):
         # Show the window
         self.graph_window.show()
 
-    def get_current_frame(self):
-        ret, frame = self.cam.read()
-        if not ret:  # End of video or error
-            self.cam.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Restart video if needed
-            logging.info("Restarting video playback.")
-            ret, frame = self.cam.read()
-        return frame if ret else None
+    def on_save_data_checkbox_changed(self, state):
+        if state == QtCore.Qt.Checked:
+            logging.info("Save Data option enabled.")
+        else:
+            logging.info("Save Data option disabled.")
+
+    # def get_current_frame(self):
+    #     ret, frame = self.cam.read()
+    #     if not ret:  # End of video or error
+    #         self.cam.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Restart video if needed
+    #         logging.info("Restarting video playback.")
+    #         ret, frame = self.cam.read()
+    #     return frame if ret else None
 
 ########################################################################################
 # GRAPH WINDOW CLASS
