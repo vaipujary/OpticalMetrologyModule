@@ -1,5 +1,31 @@
 {
     "scaling_factor": {
         "pixels_per_mm": 23.269069947552367
-    }
+    },
+    "frame_rate": 30,
+    "max_trajectory_length": 30,
+    "output_csv": "particle_data.csv",
+    "debug": false,
+    "detection_params": {
+        "maxCorners": 2000,
+        "qualityLevel": 0.01,
+        "minDistance": 5,
+        "blockSize": 5,
+        "useHarrisDetector": true,
+        "k": 0.04
+    },
+    "lk_params": {
+        "winSize": [
+            15,
+            15
+        ],
+        "maxLevel": 2,
+        "criteria": {
+            "type": "EPS | COUNT",
+            "maxCount": 10,
+            "epsilon": 0.03
+        }
+    },
+    "duplicate_distance_threshold": 15,
+    "minimum_size_threshold": 15
 }

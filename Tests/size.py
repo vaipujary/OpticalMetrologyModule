@@ -11,17 +11,14 @@ def load_pixels_per_mm(config_path="../config.json"):
     :param config_path: Path to the configuration file.
     :return: pixels_per_mm value (float) or None if not found.
     """
-    if not os.path.exists(config_path):
-        logging.error(f"Configuration file not found: {config_path}")
-        return None
-
     try:
-        with open(config_path, "r") as config_file:
-            config = json.load(config_file)
-            return config.get("scaling_factor", {}).get("pixels_per_mm")
-    except Exception as e:
-        logging.error(f"Failed to read configuration file: {e}")
-        return None
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        scaling_factor = float(config["scaling_factor"]["pixels_per_mm"])  # Access nested value
+        return scaling_factor
+    except (FileNotFoundError, KeyError, json.JSONDecodeError, TypeError) as e:
+        logging.error(f"Error loading pixels_per_mm: {e}. Using default 1.0")
+        return 1.0
 
 def setup_logging():
     """Setup logging with file clearing."""

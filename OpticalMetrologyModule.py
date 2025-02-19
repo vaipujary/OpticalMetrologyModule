@@ -45,11 +45,14 @@ class OpticalMetrologyModule:
         :param config_path: Path to the configuration JSON file.
         :return: Pixels-per-mm scaling factor.
         """
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"Configuration file '{config_path}' not found.")
-        with open(config_path, "r") as file:
-            config = json.load(file)
-            return config["scaling_factor"]["pixels_per_mm"]
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            scaling_factor = float(config["scaling_factor"]["pixels_per_mm"])  # Access nested value
+            return scaling_factor
+        except (FileNotFoundError, KeyError, json.JSONDecodeError, TypeError) as e:
+            logging.error(f"Error loading pixels_per_mm: {e}. Using default 1.0")
+            return 1.0
 
     def initialize_csv(self):
         """Initialize the CSV file and write the header."""
@@ -59,11 +62,8 @@ class OpticalMetrologyModule:
                 ["Frame", "Timestamp (s)", "Particle ID", "X (mm)", "Y (mm)", "Size (um)", "Velocity (mm/s)",
                  "Trajectory (mm)"])
 
-    def log_to_csv(self, frame_number, particle_id, x, y, size, velocity, trajectory):
+    def log_to_csv(self, frame_number, particle_id, x, y, size, velocity, trajectory, save_data_enabled=False):
         """Log particle data into the CSV file."""
-
-        # Access the state of saveDataCheckBox
-        save_data_enabled = self.parent_ui.saveDataCheckBox.isChecked()
 
         # Only log data if the checkbox is checked
         if not save_data_enabled:
@@ -234,6 +234,103 @@ class OpticalMetrologyModule:
         # self.microsphere_ids = valid_ids
         # self.prev_gray = gray  # Store the processed grayscale frame for tracking
 
+    def _preprocess_image(self, frame):
+        """
+        Preprocesses the image for both size calculation and annotation.
+        Returns: processed image, contours, frame dimensions
+        """
+
+        # Display the original image for debugging
+        if self.debug:
+            cv2.imshow("Original Image", frame)
+            cv2.waitKey(0)
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # CLAHE for better contrast
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        if self.debug:
+            cv2.imshow("CLAHE Enhanced", enhanced)
+            cv2.waitKey(0)
+
+        # Denoise
+        denoised = cv2.fastNlMeansDenoising(enhanced, h=10)
+
+        if self.debug:
+            cv2.imshow("Denoised", denoised)
+            cv2.waitKey(0)
+
+        # Apply Gaussian blur
+        blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
+
+        if self.debug:
+            cv2.imshow("Blurred", blurred)
+            cv2.waitKey(0)
+
+        # Otsu's thresholding with additional processing
+        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        if self.debug:
+            cv2.imshow("Binary", binary)
+            cv2.waitKey(0)
+
+        # Invert the binary image to make particles white and background black
+        inverted_binary = cv2.bitwise_not(binary)
+
+        if self.debug:
+            cv2.imshow("Inverted Binary", inverted_binary)
+            cv2.waitKey(0)
+
+        # Morphological operations to clean up the binary image
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        cleaned = cv2.morphologyEx(inverted_binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
+
+        if self.debug:
+            cv2.imshow("Cleaned", cleaned)
+            cv2.waitKey(0)
+
+        # # --- Watershed Segmentation ---
+        # # Ensure the image is binary (0 or 255) for watershed.
+        # ret, sure_fg = cv2.threshold(cleaned, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        #
+        # # Finding sure background area
+        # sure_bg = cv2.dilate(sure_fg, kernel, iterations=3)  # Adjust iterations as needed
+        #
+        # # Finding unknown region
+        # unknown = cv2.subtract(sure_bg, sure_fg)
+        #
+        # # Marker labelling
+        # ret, markers = cv2.connectedComponents(sure_fg)
+        #
+        # # Add one to all labels so that sure background is not 0, but 1
+        # markers = markers + 1
+        #
+        # # Now, mark the region of unknown with zero
+        # markers[unknown == 255] = 0
+        #
+        # # Apply watershed
+        # markers = cv2.watershed(frame, markers)  # Use frame for color visualization
+        #
+        contours, _ = cv2.findContours(inverted_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if self.debug:
+            debug_contours_frame = frame.copy()
+            # Display the contours for debugging
+            cv2.drawContours(debug_contours_frame, contours, -1, (0, 0, 255), 1)
+            cv2.imshow("Debug Contours", debug_contours_frame)
+            cv2.waitKey(0)
+
+        frame_height, frame_width = frame.shape[:2]
+        return cleaned, contours, frame_width, frame_height
+
+    def _check_collision(self, x1, y1, size1, pos2):
+        """Checks if two bounding boxes overlap."""
+        x2, y2, size2 = pos2
+        return x1 < x2 + size2[0] and x1 + size1[0] > x2 and y1 < y2 + size2[1] and y1 + size1[1] > y2
+
     def annotate_frame_with_ids(self, frame):
         """
         Annotate the frame with microsphere IDs and draw circles around the contours of the particles.
@@ -241,20 +338,11 @@ class OpticalMetrologyModule:
         :param frame: The input frame (image).
         :return: Annotated frame.
         """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        denoised = cv2.fastNlMeansDenoising(enhanced, h=10)
-        blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
-        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        inverted_binary = cv2.bitwise_not(binary)
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        cleaned = cv2.morphologyEx(inverted_binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
-        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cleaned, contours, frame_width, frame_height = self._preprocess_image(frame)  # Get the preprocessed results
 
-        # Get frame dimensions
-        frame_height, frame_width = frame.shape[:2]
+        # Prepare list to store IDs associated with contours
+        contour_ids = []
+        text_positions = []  # Store the positions of already drawn text
 
         for i, contour in enumerate(contours):
             # Skip contours partially outside the frame
@@ -265,12 +353,38 @@ class OpticalMetrologyModule:
                 ellipse = cv2.fitEllipse(contour)
                 (cx, cy), (major_axis, minor_axis), angle = ellipse
                 diameter = (major_axis + minor_axis) / 2
-                # Assign numeric ID if available, else use the index as fallback
-                microsphere_id = self.microsphere_ids[i] if i < len(self.microsphere_ids) else i
+                # Assign a unique ID to this contour
+                if i < len(self.microsphere_ids):  # Use existing ids if available
+                    microsphere_id = self.microsphere_ids[i]
+
+                else:
+                    microsphere_id = self.next_particle_id
+                    self.next_particle_id += 1  # Generate a new ID if needed
+                # Store the ID associated with this contour
+                contour_ids.append(microsphere_id)
                 cv2.drawContours(frame, [contour], -1, (0, 0, 255), 1)
                 cv2.ellipse(frame, ellipse, (0, 255, 0), 1)
-                cv2.putText(frame, str(microsphere_id), (int(cx) + 10, int(cy) - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+                # --- Collision Detection ---
+                text_size, _ = cv2.getTextSize(str(microsphere_id), cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+
+                text_x = int(cx - text_size[0] / 2)
+                text_y = int(cy + text_size[1] / 2)  # Initial position
+
+                # Check for collisions with previously drawn text
+                while any(self._check_collision(text_x, text_y, text_size, pos) for pos in text_positions):
+                    text_y += text_size[1] + 2  # Move text down
+
+                text_positions.append((text_x, text_y, text_size))  # Store position
+
+                # --- Boundary Check (after collision check) ---
+                text_x = max(0, min(text_x, frame_width - text_size[0]))
+                text_y = max(text_size[1], min(text_y, frame_height))  # consider text height
+
+                cv2.putText(frame, str(microsphere_id), (text_x - 15, text_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        # Update microsphere_ids to reflect only the contours found and labeled in this frame
+        self.microsphere_ids = contour_ids
+
         # Add trajectory rendering for tracked particles (if `trajectories` exist)
         for particle_id, trajectory in self.trajectories.items():
             if len(trajectory) > 1:  # Render only if trajectory has at least two points
@@ -287,7 +401,7 @@ class OpticalMetrologyModule:
                 # Annotate the particle ID at the last known position
                 x_last, y_last = int(trajectory[-1][0] * self.scaling_factor), int(
                     trajectory[-1][1] * self.scaling_factor)
-                cv2.putText(frame, str(particle_id), (x_last + 10, y_last - 10),
+                cv2.putText(frame, str(particle_id), (x_last + 5, y_last - 5),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)  # Yellow text for trajectory ID
         return frame
 
@@ -303,10 +417,7 @@ class OpticalMetrologyModule:
         # Extract coordinates of the feature
         x, y = int(position[0]), int(position[1])
 
-        # Display the original image for debugging
-        if self.debug:
-            cv2.imshow("Original Image", gray_frame)
-            cv2.waitKey(0)
+        cleaned, contours, frame_width, frame_height = self._preprocess_image(current_frame)  # Get the preprocessed results
 
         # if len(self.microsphere_sizes) > 0:
         #     # Estimate average particle size (update based on ground truth or past frames)
@@ -320,28 +431,6 @@ class OpticalMetrologyModule:
         # y1, y2 = max(0, y - roi_size), min(gray_frame.shape[0], y + roi_size)
         # roi = gray_frame[y1:y2, x1:x2]
 
-        # Preprocess the image for better segmentation
-        # 1. CLAHE for better contrast
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray_frame)
-
-        if self.debug:
-            cv2.imshow("CLAHE Enhanced", enhanced)
-            cv2.waitKey(0)
-        #
-        # # 2. Denoise
-        denoised = cv2.fastNlMeansDenoising(enhanced, h=10)
-
-        if self.debug:
-            cv2.imshow("Denoised", denoised)
-            cv2.waitKey(0)
-
-        # 3. Apply Gaussian blur
-        blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
-
-        if self.debug:
-            cv2.imshow("Denoised", denoised)
-            cv2.waitKey(0)
 
         # # Adaptive Thresholding for segmentation
         # threshold_image = cv2.adaptiveThreshold(
@@ -352,64 +441,31 @@ class OpticalMetrologyModule:
         #     C=2  # Subtraction constant for fine-tuning
         # )
 
-        # 4. Otsu's thresholding with additional processing
-        _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-
-        if self.debug:
-            cv2.imshow("Binary", binary)
-            cv2.waitKey(0)
-
-        # Invert the binary image to make particles white and background black
-        inverted_binary = cv2.bitwise_not(binary)
-        if self.debug:
-            cv2.imshow("Inverted Binary", inverted_binary)
-            cv2.waitKey(0)
-
-        # 5. Morphological operations to clean up the binary image
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        cleaned = cv2.morphologyEx(inverted_binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
-        if self.debug:
-            cv2.imshow("Cleaned", cleaned)
-            cv2.waitKey(0)
-
-        # Find contours
-        contours, _ = cv2.findContours(cleaned, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
         # Find the contour containing the feature point
-        selected_contour = None
-        min_distance = float('inf')
-
-        if self.debug:
-            debug_contours_frame = current_frame.copy()
-            # Display the thresholded image and contours for debugging
-            cv2.drawContours(debug_contours_frame, contours, -1, (0, 0, 255), 1)
-            cv2.imshow("Debug Contours", debug_contours_frame)
-            cv2.waitKey(0)
-
         selected_contour = None
         min_distance = float("inf")
 
         for contour in contours:
-            # Calculate contour area and perimeter
-            area = cv2.contourArea(contour)
-            perimeter = cv2.arcLength(contour, True)
-
-            # # Filter out noise and irregular shapes
-            # if area < 1 or area > 1000:  # Adjust these thresholds based on your images
+            # # Calculate contour area and perimeter
+            # area = cv2.contourArea(contour)
+            # perimeter = cv2.arcLength(contour, True)
+            #
+            # # # Filter out noise and irregular shapes
+            # # if area < 1 or area > 1000:  # Adjust these thresholds based on your images
+            # #     continue
+            #
+            # # Calculate circularity
+            # circularity = 4 * np.pi * area / (perimeter * perimeter)
+            # if circularity < 0.5:  # Filter non-circular objects
             #     continue
 
-            # Calculate circularity
-            circularity = 4 * np.pi * area / (perimeter * perimeter)
-            if circularity < 0.5:  # Filter non-circular objects
-                continue
-
             # Check if point is inside or near contour
-            dist = cv2.pointPolygonTest(contour, (x, y), True)
-            if dist >= -5:  # Accept points within or very close to contour
-                if abs(dist) < min_distance:
-                    min_distance = abs(dist)
-                    selected_contour = contour
+            dist = abs(cv2.pointPolygonTest(contour, (x, y), True))
+            # Consider only contours that contain or are very close to the point, and choose the nearest one.
+            if dist < min_distance and cv2.pointPolygonTest(contour, (x, y),
+                                                        False) >= 0:  # Point inside or very near the edge
+                min_distance = dist
+                selected_contour = contour
 
         if selected_contour is None:
             if self.debug:
@@ -436,7 +492,7 @@ class OpticalMetrologyModule:
                                 0.5,
                                 (0, 255, 0),
                                 1)
-                print(f"Calculated size for ID {microsphere_id}: {diameter:.1f}px")
+                # print(f"Calculated size for ID {microsphere_id}: {diameter:.1f}px")
                 return diameter
             except:
                 # Fallback to contour area if ellipse fitting fails
@@ -446,7 +502,13 @@ class OpticalMetrologyModule:
 
         return None
 
-    def process_frame_data(self, current_frame):
+    def calculate_velocity(self, dx, dy):
+        """Calculates velocity in mm/s given pixel displacements."""
+        velocity_px_per_frame = np.sqrt(dx ** 2 + dy ** 2)
+        velocity_mm_s = (velocity_px_per_frame / self.scaling_factor) * self.frame_rate
+        return velocity_mm_s
+
+    def process_frame_data(self, current_frame, visualize=False):
         """
         Process the current frame to calculate velocities and sizes,
         and write data to the CSV file.
@@ -455,17 +517,52 @@ class OpticalMetrologyModule:
         self.frame_number += 1
 
         # If previous frame or features are not initialized, initialize them
-        if self.prev_gray is None or self.prev_features is None:
+        if self.prev_gray is None:
             # Initialize tracking features on the first frame
             self.initialize_features(current_frame, False)
+            self.prev_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
             return
 
         # Convert the current frame to grayscale
         current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
 
+        # Check if previous features exist before calculating optical flow
+        if self.prev_features is None or self.prev_features.size == 0:
+            self.prev_features = cv2.goodFeaturesToTrack(
+                current_gray,
+                maxCorners=2000,
+                qualityLevel=0.01,
+                minDistance=5,
+                blockSize=5,
+                useHarrisDetector=True,
+                k=0.04
+            )
+            # Refine features to subpixel accuracy
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            self.prev_features = cv2.cornerSubPix(
+                current_gray,
+                self.prev_features,
+                winSize=(5, 5),  # Search window size
+                zeroZone=(-1, -1),
+                criteria=criteria
+            )
+            self.prev_gray = current_gray  # Update previous frame
+            return  # Return to ensure that the code processes in next iteration with initialized features
+
         # Calculate optical flow using Lucas-Kanade method
         current_features, status, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, current_gray, self.prev_features, None,
                                                                  **self.lk_params)
+
+        if current_features is None:  # handle the case when no features are found
+            self.prev_features = cv2.goodFeaturesToTrack(
+                current_gray,
+                maxCorners=2000,
+                qualityLevel=0.01,
+                minDistance=5,
+                blockSize=7  # Increased block size for better feature detection
+            )
+            self.prev_gray = current_gray
+            return
 
         updated_features = []
         updated_ids = []
@@ -486,11 +583,8 @@ class OpticalMetrologyModule:
                 dx = curr[0][0] - prev[0][0]
                 dy = curr[0][1] - prev[0][1]
 
-                # Calculate the magnitude of velocity
-                velocity_px_per_frame = np.sqrt(dx ** 2 + dy ** 2)
-
-                # Convert velocity to mm/s
-                velocity_mm_s = (velocity_px_per_frame / self.scaling_factor) * self.frame_rate
+                # Calculate velocity using the separate function
+                velocity_mm_s = self.calculate_velocity(dx, dy)
 
                 # Update positions and velocities
                 if microsphere_id not in self.microsphere_positions:
@@ -517,8 +611,9 @@ class OpticalMetrologyModule:
                 updated_features.append(curr)
                 updated_ids.append(microsphere_id)
             else:
-                # If particle is lost, add its ID to the lost list
-                lost_ids.append(self.microsphere_ids[i])
+                # If particle is lost, add its ID to the lost list ONLY if i is within range
+                if i < len(self.microsphere_ids):  # Check if the index is valid
+                    lost_ids.append(self.microsphere_ids[i])
 
         # Remove trajectories of lost particles
         self.remove_lost_particles(lost_ids)
@@ -530,6 +625,26 @@ class OpticalMetrologyModule:
 
         # Detect new features and add them if they don't overlap with existing ones
         self.detect_new_particles(current_frame)
+
+    def annotate_frame(self, frame):
+        """Annotates the frame with particle IDs and trajectories."""
+        for particle_id in self.microsphere_ids:  # Iterate through tracked IDs
+            if particle_id in self.microsphere_positions and self.microsphere_positions[particle_id]:
+                x_mm, y_mm = self.microsphere_positions[particle_id][-1]  # Last position
+                x = int(x_mm * self.scaling_factor)
+                y = int(y_mm * self.scaling_factor)
+                cv2.putText(frame, str(particle_id), (x + 5, y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+            # Draw trajectories (if available)
+            if particle_id in self.trajectories and len(self.trajectories[particle_id]) > 1:
+                trajectory = self.trajectories[particle_id]
+                for i in range(1, len(trajectory)):  # Draw lines between consecutive points
+                    x1, y1 = int(trajectory[i - 1][0] * self.scaling_factor), int(
+                        trajectory[i - 1][1] * self.scaling_factor)
+                    x2, y2 = int(trajectory[i][0] * self.scaling_factor), int(trajectory[i][1] * self.scaling_factor)
+                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 1)  # Yellow line for trajectory
+
+        return frame
 
     def detect_new_particles(self, current_frame):
         """
@@ -565,13 +680,20 @@ class OpticalMetrologyModule:
 
                     size = self.calculate_size(gray, self.persistent_debug_frame, (x, y), new_id)
 
-                    # Convert size to microns
-                    size_um = (size / self.scaling_factor) * 1000
+                    if size is not None:
+                        # Convert size to microns
+                        size_um = (size / self.scaling_factor) * 1000
+                    else:
+                        size_um = 0  # Or another appropriate default value, maybe logging a warning
+                        if self.debug:
+                            print(f"Warning: Size is None for particle {new_id}")
 
                     # Save the new feature
-                    self.prev_features = np.append(self.prev_features, [[x, y]], axis=0)
+                    # Reshape new feature to (1, 1, 2) and ensure float32 type
+                    new_feature = np.array([[[x, y]]], dtype=np.float32)
+                    self.prev_features = np.vstack([self.prev_features, new_feature])
                     self.microsphere_ids.append(new_id)
-                    self.microsphere_sizes[new_id] = size
+                    self.microsphere_sizes[new_id] = size if size is not None else 0
                     self.trajectories[new_id] = [(x / self.scaling_factor, y / self.scaling_factor)]  # Positions in mm
 
                     self.microsphere_positions[new_id] = [(x / self.scaling_factor, y / self.scaling_factor)]

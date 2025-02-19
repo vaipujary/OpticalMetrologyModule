@@ -11,6 +11,7 @@ class VideoProcessor:
         self.video_source = video_source
 
         self.camera = None
+        self.fps = None
 
         if input_mode == "live":
             try:
@@ -21,12 +22,13 @@ class VideoProcessor:
                 configure_path = None
         elif input_mode == "file" and video_source is not None:
             self.camera = cv2.VideoCapture(video_source)
+            self.fps = self.camera.get(cv2.CAP_PROP_FPS)
         else:
             raise ValueError("Invalid input_mode.Use 'file' or 'live', and provide a valid video_source for file input.")
 
 
         self.mask = None
-        self.fps = None
+
         self.frame_count = 0
         self.start_time = time.time()
         self.particle_colors = []
@@ -146,6 +148,22 @@ class VideoProcessor:
     def get_random_color():
         return random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
 
+    def calculate_velocity(self, trajectory, fps):
+        """Calculate velocity from trajectory and frame rate."""
+        if len(trajectory) < 2:
+            return 0  # Cannot calculate velocity with less than two points
+
+        dx = trajectory[-1][0] - trajectory[-2][0]
+        dy = trajectory[-1][1] - trajectory[-2][1]
+
+        # Calculate distance in pixels; you'll need a scaling factor to convert to real-world units (e.g., mm) if necessary.
+        distance_pixels = np.sqrt(dx ** 2 + dy ** 2)
+
+        # Velocity in pixels per second
+        velocity = distance_pixels * fps
+
+        return velocity
+
     def process_frame(self):
         """Process frame, update particle trajectories, and draw on mask."""
 
@@ -212,5 +230,28 @@ class VideoProcessor:
                             self.p0 = new.reshape(-1, 1, 2)
 
         output = cv2.add(frame, self.mask)
+        # Add velocity calculation and ID display *after* drawing trajectories:
+        if self.p0 is not None:  # Check if particles are being tracked
+            # Create a copy of trajectories keys for safe iteration while modifying
+            tracked_particle_ids = list(self.trajectories.keys())
+
+            for particle_id in tracked_particle_ids:  # Use copy of keys here
+                if particle_id in self.id_mapping.values():  # Check if still tracked
+                    velocity = self.calculate_velocity(self.trajectories[particle_id], self.fps)
+                    x, y = self.trajectories[particle_id][-1]
+                    # Convert velocity to mm/s if you have a scaling factor (pixels/mm). For example:
+                    scaling_factor = 23.269069947552367
+                    velocity_mm_per_s = velocity / scaling_factor
+                    cv2.putText(output, f"ID:{particle_id} V:{velocity_mm_per_s:.2f} mm/s", (int(x) + 5, int(y) + 5),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.particle_colors[particle_id], 2)
+                else:  # Particle is no longer tracked (removed from ID mapping)
+                    del self.trajectories[particle_id]  # Remove trajectory from list
+                    # Remove particles from self.po
+                    indices_to_remove = []
+                    for i, (new, old) in enumerate(zip(self.p0, self.p0)):
+                        existing_particle_id = self.id_mapping.get(tuple(old.ravel()))  # Use existing ID
+                        if particle_id == existing_particle_id:
+                            indices_to_remove.append(i)
+                    self.p0 = np.delete(self.p0, indices_to_remove, axis=0)
         self.old_gray = frame_gray.copy()
         return output
