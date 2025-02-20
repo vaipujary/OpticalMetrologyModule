@@ -12,7 +12,7 @@ import skimage as ski
 # 355-425 um
 
 class OpticalMetrologyModule:
-    def __init__(self, debug=False, output_csv="particle_data.csv", config_path=os.path.join(os.path.dirname(__file__), 'config.json'), frame_rate=30, parent_ui=None):
+    def __init__(self, debug=False, output_csv="particle_data.csv", config_path=os.path.join(os.path.dirname(__file__), 'config.json'), fps=30, parent_ui=None):
         # Initialize previous frame and features to None
         self.prev_gray = None
         self.prev_features = None
@@ -28,7 +28,7 @@ class OpticalMetrologyModule:
         self.lk_params = dict(winSize=(15, 15), maxLevel=2,
                               criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
         self.csv_file = output_csv  # Path to the output CSV file
-        self.frame_rate = frame_rate  # Frame rate of the video
+        self.fps = fps  # Frame rate of the video
         self.debug = debug
         self.persistent_debug_frame = None
         self.parent_ui = parent_ui
@@ -71,7 +71,7 @@ class OpticalMetrologyModule:
                 logging.info("Save Data option is disabled. Skipping CSV logging.")
             return  # Do nothing if not checked
 
-        timestamp = frame_number / self.frame_rate  # Calculate timestamp in seconds
+        timestamp = frame_number / self.fps  # Calculate timestamp in seconds
 
         # Validate the data before writing
         if not self.validate_row(frame_number, timestamp, particle_id, x, y, size, velocity, trajectory):
@@ -282,15 +282,15 @@ class OpticalMetrologyModule:
         if self.debug:
             cv2.imshow("Inverted Binary", inverted_binary)
             cv2.waitKey(0)
-
-        # Morphological operations to clean up the binary image
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        cleaned = cv2.morphologyEx(inverted_binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
-
-        if self.debug:
-            cv2.imshow("Cleaned", cleaned)
-            cv2.waitKey(0)
+        #
+        # # Morphological operations to clean up the binary image
+        # kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        # cleaned = cv2.morphologyEx(inverted_binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+        # cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_OPEN, kernel, iterations=1)
+        #
+        # if self.debug:
+        #     cv2.imshow("Cleaned", cleaned)
+        #     cv2.waitKey(0)
 
         # # --- Watershed Segmentation ---
         # # Ensure the image is binary (0 or 255) for watershed.
@@ -324,7 +324,7 @@ class OpticalMetrologyModule:
             cv2.waitKey(0)
 
         frame_height, frame_width = frame.shape[:2]
-        return cleaned, contours, frame_width, frame_height
+        return contours, frame_width, frame_height
 
     def _check_collision(self, x1, y1, size1, pos2):
         """Checks if two bounding boxes overlap."""
@@ -338,7 +338,7 @@ class OpticalMetrologyModule:
         :param frame: The input frame (image).
         :return: Annotated frame.
         """
-        cleaned, contours, frame_width, frame_height = self._preprocess_image(frame)  # Get the preprocessed results
+        contours, frame_width, frame_height = self._preprocess_image(frame)  # Get the preprocessed results
 
         # Prepare list to store IDs associated with contours
         contour_ids = []
@@ -405,60 +405,25 @@ class OpticalMetrologyModule:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)  # Yellow text for trajectory ID
         return frame
 
-    def calculate_size(self, gray_frame, current_frame, position, microsphere_id):
+    def calculate_size(self, current_frame, position, microsphere_id):
         """
         Calculate the size of a microsphere located at a given position.
 
-        :param enhanced: Grayscale image for processing.
         :param current_frame: Current image/frame with detected particles.
         :param position: Tuple (x, y) of the detected feature coordinates.
+        :param microsphere_id: ID of the particle
         :return: Measured diameter (in pixels) of the microsphere or 0 if calculation fails.
         """
         # Extract coordinates of the feature
         x, y = int(position[0]), int(position[1])
 
-        cleaned, contours, frame_width, frame_height = self._preprocess_image(current_frame)  # Get the preprocessed results
-
-        # if len(self.microsphere_sizes) > 0:
-        #     # Estimate average particle size (update based on ground truth or past frames)
-        #     average_size = np.mean([size for size in self.microsphere_sizes.values() if size > 0])
-        #     # Define a region of interest around the feature
-        #     roi_size = max(5, int(average_size // 3))
-        # else:
-        #     roi_size = 100
-
-        # x1, x2 = max(0, x - roi_size), min(gray_frame.shape[1], x + roi_size)
-        # y1, y2 = max(0, y - roi_size), min(gray_frame.shape[0], y + roi_size)
-        # roi = gray_frame[y1:y2, x1:x2]
-
-
-        # # Adaptive Thresholding for segmentation
-        # threshold_image = cv2.adaptiveThreshold(
-        #     gray_frame, 255,
-        #     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,  # Gaussian-weighted mean for thresholding
-        #     cv2.THRESH_BINARY,
-        #     blockSize=11,  # Local neighborhood size
-        #     C=2  # Subtraction constant for fine-tuning
-        # )
+        contours, frame_width, frame_height = self._preprocess_image(current_frame)  # Get the preprocessed results
 
         # Find the contour containing the feature point
         selected_contour = None
         min_distance = float("inf")
 
         for contour in contours:
-            # # Calculate contour area and perimeter
-            # area = cv2.contourArea(contour)
-            # perimeter = cv2.arcLength(contour, True)
-            #
-            # # # Filter out noise and irregular shapes
-            # # if area < 1 or area > 1000:  # Adjust these thresholds based on your images
-            # #     continue
-            #
-            # # Calculate circularity
-            # circularity = 4 * np.pi * area / (perimeter * perimeter)
-            # if circularity < 0.5:  # Filter non-circular objects
-            #     continue
-
             # Check if point is inside or near contour
             dist = abs(cv2.pointPolygonTest(contour, (x, y), True))
             # Consider only contours that contain or are very close to the point, and choose the nearest one.
@@ -497,16 +462,61 @@ class OpticalMetrologyModule:
             except:
                 # Fallback to contour area if ellipse fitting fails
                 area = cv2.contourArea(selected_contour)
-                diameter = 2 * np.sqrt(area / np.pi)
-                return diameter
+                if area > 0:
+                    diameter = 2 * np.sqrt(area / np.pi)
+                    return diameter
 
-        return None
+        return None # Return None if no suitable contour is found.
 
-    def calculate_velocity(self, dx, dy):
-        """Calculates velocity in mm/s given pixel displacements."""
-        velocity_px_per_frame = np.sqrt(dx ** 2 + dy ** 2)
-        velocity_mm_s = (velocity_px_per_frame / self.scaling_factor) * self.frame_rate
-        return velocity_mm_s
+    # if len(self.microsphere_sizes) > 0:
+    #     # Estimate average particle size (update based on ground truth or past frames)
+    #     average_size = np.mean([size for size in self.microsphere_sizes.values() if size > 0])
+    #     # Define a region of interest around the feature
+    #     roi_size = max(5, int(average_size // 3))
+    # else:
+    #     roi_size = 100
+
+    # x1, x2 = max(0, x - roi_size), min(gray_frame.shape[1], x + roi_size)
+    # y1, y2 = max(0, y - roi_size), min(gray_frame.shape[0], y + roi_size)
+    # roi = gray_frame[y1:y2, x1:x2]
+
+    # # Adaptive Thresholding for segmentation
+    # threshold_image = cv2.adaptiveThreshold(
+    #     gray_frame, 255,
+    #     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,  # Gaussian-weighted mean for thresholding
+    #     cv2.THRESH_BINARY,
+    #     blockSize=11,  # Local neighborhood size
+    #     C=2  # Subtraction constant for fine-tuning
+    # )
+
+    # # Calculate contour area and perimeter
+    # area = cv2.contourArea(contour)
+    # perimeter = cv2.arcLength(contour, True)
+    #
+    # # # Filter out noise and irregular shapes
+    # # if area < 1 or area > 1000:  # Adjust these thresholds based on your images
+    # #     continue
+    #
+    # # Calculate circularity
+    # circularity = 4 * np.pi * area / (perimeter * perimeter)
+    # if circularity < 0.5:  # Filter non-circular objects
+    #     continue
+
+    def calculate_velocity(self, trajectory):
+        """Calculate velocity from trajectory and frame rate."""
+        if len(trajectory) < 2:
+            return 0  # Cannot calculate velocity with less than two points
+
+        dx = trajectory[-1][0] - trajectory[-2][0]
+        dy = trajectory[-1][1] - trajectory[-2][1]
+
+        # Calculate distance in pixels; you'll need a scaling factor to convert to real-world units (e.g., mm) if necessary.
+        distance_pixels = np.sqrt(dx ** 2 + dy ** 2)
+
+        # Velocity in pixels per second
+        velocity = distance_pixels * self.fps
+
+        return velocity
 
     def process_frame_data(self, current_frame, visualize=False):
         """

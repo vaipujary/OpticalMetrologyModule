@@ -1,11 +1,38 @@
+import datetime
+
 import numpy as np
 import random
 import time
+import json
 import cv2
 from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
+from OpticalMetrologyModule import OpticalMetrologyModule
+
+def load_pixels_per_mm(config_path="../config.json"):
+    """
+    Load the pixels_per_mm value from the config.json file.
+
+    :param config_path: Path to the configuration file.
+    :return: pixels_per_mm value (float) or None if not found.
+    """
+    try:
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        scaling_factor = float(config["scaling_factor"]["pixels_per_mm"])  # Access nested value
+        return scaling_factor
+    except (FileNotFoundError, KeyError, json.JSONDecodeError, TypeError) as e:
+        print("Error loading pixels_per_mm from config.json:", e)
+        return 1.0
 
 class VideoProcessor:
-    def __init__(self, ui_video_label, input_mode="file", video_source=None):
+    def __init__(self, ui_video_label, input_mode="file", video_source=None, save_data_enabled=False):
+        self.save_data_enabled = save_data_enabled
+
+        # Create a temporary CSV file for testing
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_csv = f"test_particle_data_{timestamp}.csv"
+        self.optical_metrology_module = OpticalMetrologyModule(debug=False, output_csv=output_csv)
+
         self.ui_video_label = ui_video_label
         self.input_mode = input_mode
         self.video_source = video_source
@@ -26,9 +53,8 @@ class VideoProcessor:
         else:
             raise ValueError("Invalid input_mode.Use 'file' or 'live', and provide a valid video_source for file input.")
 
-
         self.mask = None
-
+        self.scaling_factor = load_pixels_per_mm()
         self.frame_count = 0
         self.start_time = time.time()
         self.particle_colors = []
@@ -36,8 +62,6 @@ class VideoProcessor:
         self.id_mapping = {}
         self.old_gray = None
         self.p0 = None
-        self.prev_frame_time = 0
-        self.new_frame_time = 0
 
         # Parameters for goodFeaturesToTrack and Lucas-Kanade Optical Flow
         self.feature_params = dict(maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
@@ -97,7 +121,6 @@ class VideoProcessor:
                 print(f"Error disposing SDK: {e}")
             self.sdk = None
 
-
     def initialize_tracking(self):
         """Initialize the particle tracking by capturing the initial frame."""
         frame = self._get_frame()
@@ -112,7 +135,6 @@ class VideoProcessor:
         self.p0 = cv2.goodFeaturesToTrack(self.old_gray, mask=None, **self.feature_params)
         if self.p0 is not None:
             # Assign random colors to features
-            # self.particle_colors = {i: self.get_random_color() for i in range(len(self.p0))}
             self.particle_colors = [self.get_random_color() for _ in range(len(self.p0))]
         # Initialize the mask for drawing trajectories
         self.mask = np.zeros_like(frame)
@@ -148,23 +170,7 @@ class VideoProcessor:
     def get_random_color():
         return random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
 
-    def calculate_velocity(self, trajectory, fps):
-        """Calculate velocity from trajectory and frame rate."""
-        if len(trajectory) < 2:
-            return 0  # Cannot calculate velocity with less than two points
-
-        dx = trajectory[-1][0] - trajectory[-2][0]
-        dy = trajectory[-1][1] - trajectory[-2][1]
-
-        # Calculate distance in pixels; you'll need a scaling factor to convert to real-world units (e.g., mm) if necessary.
-        distance_pixels = np.sqrt(dx ** 2 + dy ** 2)
-
-        # Velocity in pixels per second
-        velocity = distance_pixels * fps
-
-        return velocity
-
-    def process_frame(self):
+    def process_frame(self, save_data_enabled=False):
         """Process frame, update particle trajectories, and draw on mask."""
 
         frame = self._get_frame()
@@ -181,6 +187,7 @@ class VideoProcessor:
         # 1. Manage Lost Particles and Update Trajectories
         new_p0 = []
         new_id_mapping = {}
+        particle_sizes = {}  # Dictionary to store sizes
 
         if self.p0 is not None:
             p1, st, err = cv2.calcOpticalFlowPyrLK(self.old_gray, frame_gray, self.p0, None, **self.lk_params)
@@ -188,7 +195,6 @@ class VideoProcessor:
             if p1 is not None:
                 for i, (new, old) in enumerate(zip(p1, self.p0)):
                     a, b = new.ravel()
-                    c, d = old.ravel()
                     particle_id = self.id_mapping.get(tuple(old.ravel()))  # Use existing ID
 
                     if particle_id is not None and st[i, 0] == 1:  # Check tracking status
@@ -200,6 +206,13 @@ class VideoProcessor:
                             self.trajectories[particle_id].append((a, b))
                         else:
                             self.trajectories[particle_id] = [(a, b)]  # Initialize if new
+
+                        # Size Calculation (for existing particles)
+                        size = self.optical_metrology_module.calculate_size(frame.copy(), (a, b),
+                                                                            particle_id)
+                        if size is not None:
+                            size_um = (size / self.scaling_factor) * 1000  # Store in microns
+                            particle_sizes[particle_id] = size_um  # Store size
 
                         self.trajectories[particle_id] = self.trajectories[particle_id][-30:]
                         for k in range(1, len(self.trajectories[particle_id])):
@@ -222,28 +235,45 @@ class VideoProcessor:
                     if (a, b) not in self.id_mapping:  # Don't create a duplicate particle
                         particle_id = len(self.particle_colors)  # increment ID
                         self.particle_colors.append(self.get_random_color())
-                        self.trajectories[particle_id] = [(a, b)]
+                        self.trajectories[particle_id] = [(a, b)] # Initialize trajectories
                         self.id_mapping[(a, b)] = particle_id  # Create new particle
+                        size = self.optical_metrology_module.calculate_size(frame.copy(),(a, b),
+                                                                            particle_id)  # Size for new particles
+                        if size is not None:
+                            size_um = (size / self.scaling_factor) * 1000  # Convert and store size for new particles
+                            particle_sizes[particle_id] = size_um
+
                         if self.p0 is not None:
                             self.p0 = np.vstack((self.p0, new.reshape(-1, 1, 2)))
                         else:
                             self.p0 = new.reshape(-1, 1, 2)
 
         output = cv2.add(frame, self.mask)
-        # Add velocity calculation and ID display *after* drawing trajectories:
+
+        # # Display information (ID, velocity, size) on the frame *after* drawing trajectories:
         if self.p0 is not None:  # Check if particles are being tracked
             # Create a copy of trajectories keys for safe iteration while modifying
             tracked_particle_ids = list(self.trajectories.keys())
 
             for particle_id in tracked_particle_ids:  # Use copy of keys here
                 if particle_id in self.id_mapping.values():  # Check if still tracked
-                    velocity = self.calculate_velocity(self.trajectories[particle_id], self.fps)
+                    velocity = self.optical_metrology_module.calculate_velocity(self.trajectories[particle_id])
                     x, y = self.trajectories[particle_id][-1]
-                    # Convert velocity to mm/s if you have a scaling factor (pixels/mm). For example:
-                    scaling_factor = 23.269069947552367
-                    velocity_mm_per_s = velocity / scaling_factor
-                    cv2.putText(output, f"ID:{particle_id} V:{velocity_mm_per_s:.2f} mm/s", (int(x) + 5, int(y) + 5),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.particle_colors[particle_id], 2)
+                    # Convert velocity to mm/s
+                    velocity_mm_per_s = velocity / self.scaling_factor
+
+                    size_um = particle_sizes.get(particle_id)
+                    if size_um is not None:
+                        if self.save_data_enabled:  # Write data if enabled
+                            frame_number = self.frame_count
+                            trajectory_mm = [(point[0] / self.scaling_factor, point[1] / self.scaling_factor) for point in self.trajectories[particle_id]]
+                            x_mm = x / self.scaling_factor
+                            y_mm = y / self.scaling_factor
+                            self.optical_metrology_module.log_to_csv(frame_number, particle_id, x_mm, y_mm, size_um,
+                                                                     velocity_mm_per_s, trajectory_mm, save_data_enabled)
+                        print(f"Particle ID: {particle_id}, Size: {size_um:.3f} um, Velocity: {velocity_mm_per_s:.2f} mm/s")
+                        cv2.putText(output, f"ID:{particle_id}", (int(x) + 5, int(y) + 5),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.particle_colors[particle_id], 1)
                 else:  # Particle is no longer tracked (removed from ID mapping)
                     del self.trajectories[particle_id]  # Remove trajectory from list
                     # Remove particles from self.po
