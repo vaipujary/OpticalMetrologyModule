@@ -10,7 +10,7 @@ from VideoProcessor import VideoProcessor
 from OpticalMetrologyModule import OpticalMetrologyModule
 
 
-def run_multiprocessing(input_queue, output_queue, video_path):
+def run_multiprocessing(input_queue, output_array, lock, event, video_path):
     video_processor_local = VideoProcessor(ui_video_label=None, input_mode="file", video_source=video_path,
                                            save_data_enabled=True)
     video_processor_local.initialize_tracking()
@@ -21,7 +21,7 @@ def run_multiprocessing(input_queue, output_queue, video_path):
     while True:
         frame_data = input_queue.get()
         if frame_data is None:
-            input_queue.task_done()  # Indicate that a formerly enqueued task is complete
+            # input_queue.task_done()  # Indicate that a formerly enqueued task is complete
             break
 
         frame_number, frame = frame_data
@@ -36,59 +36,44 @@ def run_multiprocessing(input_queue, output_queue, video_path):
                 video_processor_local.optical_metrology_module.log_to_csv(**result,
                                                                           save_data_enabled=video_processor_local.save_data_enabled)  # Log data as it's processed
 
+        with lock:  # Acquire lock before writing to shared array
+            output_array[frame_number] = output.copy()
+
+        event.set()  # Signal that processing is complete for this frame
+
         video_processor_local.old_gray = frame_gray
         video_processor_local.p0 = new_p0
         video_processor_local.trajectories = new_trajectories
         video_processor_local.particle_colors = new_particle_colors
         video_processor_local.id_mapping = new_id_mapping
 
-        output_queue.put((frame_number, output))
-        input_queue.task_done()
 
-
-def video_processing_thread(input_queue, output_queue, video_path, num_processes, display_queue):
-
-    video_processor_local = VideoProcessor(ui_video_label=None, input_mode="file", video_source=video_path,
-                                           save_data_enabled=True)
-
-    video_processor_local.initialize_tracking()
-
-    frame_count = 0
-
+def video_processing_thread(input_queue, video_path, num_processes):
     cap = cv2.VideoCapture(video_path)
-
-    while True: # Main loop for processing frames
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    for frame_number in range(frame_count):
         ret, frame = cap.read()
         if not ret:
             break
-
-        input_queue.put((frame_count, frame.copy()))
-        frame_count += 1
+        input_queue.put((frame_number, frame.copy()))
 
     cap.release()
-
-    for _ in range(num_processes):
-        input_queue.put(None)  # Signal processes to stop
-
-    for _ in range(frame_count):  # Retrieve all processed frames
-        _, output = output_queue.get()
-        display_queue.put((output, _))
-
-    display_queue.put(None)  # Sentinel to signal end of video
+    for _ in range(num_processes):  # Send termination signals
+        input_queue.put(None)
 
 
-def display_thread(display_queue):  # New thread for displaying results
-    while True:
-        item = display_queue.get()
-        if item is None:
-            break
-        output, frame_number = item
+def display_thread(output_array, lock, event, frame_count):
+    for frame_number in range(frame_count):
+        event.wait()  # Wait for frame to be processed
+        event.clear()
+        with lock:
+            output = output_array[frame_number]
+        if output is not None and output.size > 0:  # Check if the output is valid and not empty
+            cv2.imshow("Processed Frame", output)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
 
-        cv2.imshow("Processed Frame", output)  # Displaying results in order.
-        if cv2.waitKey(1) & 0xFF == ord('q'):  # Exit gracefully if 'q' is pressed
-            break  # Exit gracefully if 'q' is pressed.
     cv2.destroyAllWindows()
-
 
 def main():
     # Ensuring output path exists
@@ -100,32 +85,43 @@ def main():
 
     video_path = "../Test Data/Videos/MicrosphereVideo3.avi"
 
-    input_queue = mp.JoinableQueue()  # Queue to hold a few frames for processing
-    display_queue = mp.Queue()
-    output_queue = mp.Queue()
-
     num_processes = mp.cpu_count() - 1  # Use most CPU cores but leave one for other tasks
 
-    calculation_processes = [mp.Process(target=run_multiprocessing,
-                                        args=(input_queue, output_queue, video_path)) for _ in range(num_processes)]
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()  # Read the first frame to get dimensions
+    if not ret:
+        print("Error reading video file.")
+        return
 
-    for p in calculation_processes:
-        p.start()
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()  # Release the capture immediately
 
-    video_thread = threading.Thread(target=video_processing_thread,
-                                    args=(input_queue, output_queue, video_path, num_processes, display_queue))
+    with mp.Manager() as manager:
+        input_queue = manager.JoinableQueue()  # Queue to hold a few frames for processing
+        output_array = manager.list([None] * frame_count)  # manager for shared state
+        lock = manager.Lock()
+        event = manager.Event()
 
-    display_thread_instance = threading.Thread(target=display_thread, args=(display_queue,))
+        calculation_processes = [mp.Process(target=run_multiprocessing,
+                                            args=(input_queue, output_array, lock, event, video_path)) for _ in range(num_processes)]
 
-    video_thread.start()
-    display_thread_instance.start()
-    video_thread.join()  # Wait for the video processing thread to finish.
+        for p in calculation_processes:
+            p.start()
 
-    for p in calculation_processes:
-        p.join()
+        video_thread = threading.Thread(target=video_processing_thread,
+                                        args=(input_queue, video_path, num_processes))
 
-    display_thread_instance.join()
-    cv2.destroyAllWindows()
+        display_thread_instance = threading.Thread(target=display_thread, args=(output_array, lock, event, frame_count))
+
+        video_thread.start()
+        display_thread_instance.start()
+        video_thread.join()  # Wait for the video processing thread to finish.
+
+        for p in calculation_processes:
+            p.join()
+
+        display_thread_instance.join()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     main()
