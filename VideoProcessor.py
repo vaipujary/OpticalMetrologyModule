@@ -49,16 +49,19 @@ class VideoProcessor:
                 from windows_setup import configure_path
                 configure_path()
                 self._setup_camera()
+                self.mask = None
             except ImportError:
                 configure_path = None
         elif input_mode == "file" and video_source is not None:
             self.camera = cv2.VideoCapture(video_source)
+            ret, frame = self.camera.read()
+            if ret:
+                self.mask = np.zeros_like(frame)
 
         else:
             raise ValueError("Invalid input_mode.Use 'file' or 'live', and provide a valid video_source for file input.")
 
         self.fps = self.camera.get(cv2.CAP_PROP_FPS)
-        self.mask = None
         self.scaling_factor = load_pixels_per_mm()
         self.frame_count = 0
         self.start_time = time.time()
@@ -129,6 +132,7 @@ class VideoProcessor:
 
     def initialize_tracking(self):
         """Initialize the particle tracking by capturing the initial frame."""
+        print("inside initialize_tracking!")
         frame = self.get_frame()
         if frame is None:
             print("Error: Unable to retrieve the initial frame.")
@@ -140,8 +144,11 @@ class VideoProcessor:
         # Detect initial particle features
         self.p0 = cv2.goodFeaturesToTrack(self.old_gray, mask=None, **self.feature_params)
         if self.p0 is not None:
+            print("YAY!")
             # Assign random colors to features using a dictionary
             self.particle_colors = {i: self.get_random_color() for i in range(len(self.p0))}
+            self.id_mapping = {tuple(p.ravel()): i for i, p in enumerate(self.p0)}
+
         # Initialize the mask for drawing trajectories
         self.mask = np.zeros_like(frame)
         return True
@@ -178,47 +185,62 @@ class VideoProcessor:
 
     def track_particles(self, frame):
         """Tracks particles on a frame, suitable for multiprocessing."""
-
+        print("inside track_particles!")
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         new_p0 = []
         new_id_mapping = self.id_mapping.copy()
         new_trajectories = self.trajectories.copy()
         new_particle_colors = self.particle_colors.copy()
-        mask = self.mask.copy()  # Assuming self.mask is initialized earlier, for example, in the initializer or get_frame
+        mask = self.mask.copy()  # Work on a copy, preserving original mask
+        mask = mask.astype(np.uint8)
+
         old_gray = self.old_gray
         p0 = self.p0
+        # Create a new transparent overlay for the trajectories
+        overlay = np.zeros_like(frame)
 
         if p0 is not None and len(p0) > 0:
-                p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **self.lk_params)
+            print("inside p0 is not None and len(p0) > 0")
+            p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **self.lk_params)
 
-                if p1 is not None:
-                    p1_2d = p1.reshape(-1, 2)
-                    p0_2d = p0.reshape(-1, 2)
+            if p1 is not None:
+                p1_2d = p1.reshape(-1, 2)
+                p0_2d = p0.reshape(-1, 2)
 
-                    for i, (new, old) in enumerate(zip(p1_2d, p0_2d)):
-                        particle_id = new_id_mapping.get(tuple(old))
+                for i, (new, old) in enumerate(zip(p1_2d, p0_2d)):
+                    particle_id = new_id_mapping.get(tuple(old))
+                    print(f"the particle_id is {particle_id}")
+                    if particle_id is not None and st[i, 0] == 1:
+                        print("inside particle_id is not None and st[i, 0] == 1")
+                        new_id_mapping[tuple(new)] = particle_id
+                        new_p0.append(new)
+                        del new_id_mapping[tuple(old)]
 
-                        if particle_id is not None and st[i, 0] == 1:
-                            new_id_mapping[tuple(new)] = particle_id
-                            new_p0.append(new)
+                        if particle_id in new_trajectories:
+                            print("inside particle_id in new_trajectories")
+                            new_trajectories[particle_id].append(tuple(new))
+                        else:
+                            new_trajectories[particle_id] = [tuple(new)]
 
-                            if particle_id in new_trajectories:
-                                new_trajectories[particle_id].append(tuple(new))
-                            else:
-                                new_trajectories[particle_id] = [tuple(new)]
+                        new_trajectories[particle_id] = new_trajectories[particle_id][-30:]
 
-                            new_trajectories[particle_id] = new_trajectories[particle_id][-30:]
-
-                            for k in range(1, len(new_trajectories[particle_id])):
-                                pt1 = new_trajectories[particle_id][k - 1]
-                                pt2 = new_trajectories[particle_id][k]
-                                cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
-                                         new_particle_colors[particle_id], 1)
+                        for k in range(1, len(new_trajectories[particle_id])):
+                            print("is this for loop even executed?")
+                            pt1 = new_trajectories[particle_id][k - 1]
+                            pt2 = new_trajectories[particle_id][k]
+                            cv2.line(overlay, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
+                                     new_particle_colors[particle_id], 2)
+                            print(f"Drew line from {pt1} to {pt2} with color {new_particle_colors[particle_id]}")
 
         if new_p0:  # check to ensure that if new_p0 is not empty, it is reshaped into a numpy array
             new_p0 = np.array(new_p0).reshape(-1, 1, 2)
-        return frame, frame_gray, new_p0, new_trajectories, new_particle_colors, new_id_mapping
+
+        output = cv2.addWeighted(frame, 1, overlay, 1, 0)  # Accumulate changes
+
+        self.mask = overlay # store the mask locally
+
+        return output, frame_gray, new_p0, new_trajectories, new_particle_colors, new_id_mapping, self.mask
 
 
     # def process_frame(self, save_data_enabled=False):

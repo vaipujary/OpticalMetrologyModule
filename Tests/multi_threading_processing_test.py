@@ -10,7 +10,7 @@ from VideoProcessor import VideoProcessor
 from OpticalMetrologyModule import OpticalMetrologyModule
 
 
-def run_multiprocessing(input_queue, output_array, lock, event, video_path):
+def run_multiprocessing(input_queue, output_array, lock, event, video_path, output_csv_path):
     video_processor_local = VideoProcessor(ui_video_label=None, input_mode="file", video_source=video_path,
                                            save_data_enabled=True)
     video_processor_local.initialize_tracking()
@@ -25,7 +25,7 @@ def run_multiprocessing(input_queue, output_array, lock, event, video_path):
             break
 
         frame_number, frame = frame_data
-        output, frame_gray, new_p0, new_trajectories, new_particle_colors, new_id_mapping = video_processor_local.track_particles(
+        output, frame_gray, new_p0, new_trajectories, new_particle_colors, new_id_mapping, updated_mask = video_processor_local.track_particles(
             frame)
 
         results = video_processor_local.optical_metrology_module.perform_metrology_calculations(output,
@@ -38,6 +38,8 @@ def run_multiprocessing(input_queue, output_array, lock, event, video_path):
 
         with lock:  # Acquire lock before writing to shared array
             output_array[frame_number] = output.copy()
+
+        # mask_queue.put(updated_mask.copy())  # Put a copy of the mask into the queue
 
         event.set()  # Signal that processing is complete for this frame
 
@@ -66,9 +68,19 @@ def display_thread(output_array, lock, event, frame_count):
     for frame_number in range(frame_count):
         event.wait()  # Wait for frame to be processed
         event.clear()
+        # mask = mask_queue.get(timeout=1)  # Get the latest mask from the queue
+        # mask = mask.astype(np.uint8)
+        #
+        # if mask is None:
+        #     print("Mask queue timeout!")
+        #     continue  # Skip this frame if mask isn't available
+
         with lock:
             output = output_array[frame_number]
         if output is not None and output.size > 0:  # Check if the output is valid and not empty
+            # output = cv2.add(output, mask)
+            # cv2.imshow("Mask", mask)
+
             cv2.imshow("Processed Frame", output)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
@@ -97,13 +109,14 @@ def main():
     cap.release()  # Release the capture immediately
 
     with mp.Manager() as manager:
+        # mask_queue = manager.Queue(maxsize=1)
         input_queue = manager.JoinableQueue()  # Queue to hold a few frames for processing
         output_array = manager.list([None] * frame_count)  # manager for shared state
         lock = manager.Lock()
         event = manager.Event()
 
         calculation_processes = [mp.Process(target=run_multiprocessing,
-                                            args=(input_queue, output_array, lock, event, video_path)) for _ in range(num_processes)]
+                                            args=(input_queue, output_array, lock, event, video_path, output_csv_path)) for _ in range(num_processes)]
 
         for p in calculation_processes:
             p.start()
@@ -114,13 +127,17 @@ def main():
         display_thread_instance = threading.Thread(target=display_thread, args=(output_array, lock, event, frame_count))
 
         video_thread.start()
+        print("after video_thread.start()")
         display_thread_instance.start()
+        print("after display_thread_instance.start()")
         video_thread.join()  # Wait for the video processing thread to finish.
+        print("after video_thread.join()")
 
         for p in calculation_processes:
             p.join()
 
         display_thread_instance.join()
+        print("after display_thread_instance.join()")
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
