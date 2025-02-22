@@ -3,13 +3,10 @@ import numpy as np
 import csv
 import os
 import json
-import matplotlib.pyplot as plt
 import logging
-import trackpy as tp
-import pims
-import skimage as ski
 
 # 355-425 um
+
 
 class OpticalMetrologyModule:
     def __init__(self, debug=False, output_csv="particle_data.csv", config_path=os.path.join(os.path.dirname(__file__), 'config.json'), fps=30, parent_ui=None):
@@ -189,7 +186,7 @@ class OpticalMetrologyModule:
             # Ensure coordinates are within image bounds
             if 0 <= x < frame_width and 0 <= y < frame_height:
 
-                size = self.calculate_size(gray, self.persistent_debug_frame, (x, y), self.microsphere_ids[i])
+                size = self.calculate_size(gray, (x, y), self.microsphere_ids[i])
 
                 # Validate the size result
                 if size is not None and size > 0:  # Skip features with invalid or non-positive sizes
@@ -245,7 +242,13 @@ class OpticalMetrologyModule:
             cv2.imshow("Original Image", frame)
             cv2.waitKey(0)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Check if the image is already grayscale
+        if len(frame.shape) == 2:  # Grayscale image
+            gray = frame
+        elif frame.shape[2] == 1:
+            gray = frame
+        else:  # Convert to grayscale if it's not already.
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
         # CLAHE for better contrast
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
@@ -255,15 +258,15 @@ class OpticalMetrologyModule:
             cv2.imshow("CLAHE Enhanced", enhanced)
             cv2.waitKey(0)
 
-        # Denoise
-        denoised = cv2.fastNlMeansDenoising(enhanced, h=10)
-
-        if self.debug:
-            cv2.imshow("Denoised", denoised)
-            cv2.waitKey(0)
+        # # Denoise
+        # denoised = cv2.fastNlMeansDenoising(enhanced, h=10)
+        #
+        # if self.debug:
+        #     cv2.imshow("Denoised", denoised)
+        #     cv2.waitKey(0)
 
         # Apply Gaussian blur
-        blurred = cv2.GaussianBlur(denoised, (5, 5), 0)
+        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
 
         if self.debug:
             cv2.imshow("Blurred", blurred)
@@ -405,7 +408,7 @@ class OpticalMetrologyModule:
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)  # Yellow text for trajectory ID
         return frame
 
-    def calculate_size(self, current_frame, position, microsphere_id):
+    def calculate_size(self, current_frame, position, microsphere_id=None):
         """
         Calculate the size of a microsphere located at a given position.
 
@@ -417,7 +420,7 @@ class OpticalMetrologyModule:
         # Extract coordinates of the feature
         x, y = int(position[0]), int(position[1])
 
-        contours, frame_width, frame_height = self._preprocess_image(current_frame)  # Get the preprocessed results
+        contours, frame_width, frame_height = self._preprocess_image(current_frame.copy())  # Get the preprocessed results
 
         # Find the contour containing the feature point
         selected_contour = None
@@ -468,49 +471,12 @@ class OpticalMetrologyModule:
 
         return None # Return None if no suitable contour is found.
 
-    # if len(self.microsphere_sizes) > 0:
-    #     # Estimate average particle size (update based on ground truth or past frames)
-    #     average_size = np.mean([size for size in self.microsphere_sizes.values() if size > 0])
-    #     # Define a region of interest around the feature
-    #     roi_size = max(5, int(average_size // 3))
-    # else:
-    #     roi_size = 100
-
-    # x1, x2 = max(0, x - roi_size), min(gray_frame.shape[1], x + roi_size)
-    # y1, y2 = max(0, y - roi_size), min(gray_frame.shape[0], y + roi_size)
-    # roi = gray_frame[y1:y2, x1:x2]
-
-    # # Adaptive Thresholding for segmentation
-    # threshold_image = cv2.adaptiveThreshold(
-    #     gray_frame, 255,
-    #     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,  # Gaussian-weighted mean for thresholding
-    #     cv2.THRESH_BINARY,
-    #     blockSize=11,  # Local neighborhood size
-    #     C=2  # Subtraction constant for fine-tuning
-    # )
-
-    # # Calculate contour area and perimeter
-    # area = cv2.contourArea(contour)
-    # perimeter = cv2.arcLength(contour, True)
-    #
-    # # # Filter out noise and irregular shapes
-    # # if area < 1 or area > 1000:  # Adjust these thresholds based on your images
-    # #     continue
-    #
-    # # Calculate circularity
-    # circularity = 4 * np.pi * area / (perimeter * perimeter)
-    # if circularity < 0.5:  # Filter non-circular objects
-    #     continue
-
-    def calculate_velocity(self, trajectory):
+    def calculate_velocity(self, new_x, new_y, old_x, old_y):
         """Calculate velocity from trajectory and frame rate."""
-        if len(trajectory) < 2:
-            return 0  # Cannot calculate velocity with less than two points
+        dx = new_x - old_x
+        dy = new_y - old_y
 
-        dx = trajectory[-1][0] - trajectory[-2][0]
-        dy = trajectory[-1][1] - trajectory[-2][1]
-
-        # Calculate distance in pixels; you'll need a scaling factor to convert to real-world units (e.g., mm) if necessary.
+        # Calculate distance in pixels
         distance_pixels = np.sqrt(dx ** 2 + dy ** 2)
 
         # Velocity in pixels per second
@@ -518,123 +484,68 @@ class OpticalMetrologyModule:
 
         return velocity
 
-    def process_frame_data(self, current_frame, visualize=False):
-        """
-        Process the current frame to calculate velocities and sizes,
-        and write data to the CSV file.
-        """
-        # Increment the frame number
-        self.frame_number += 1
 
-        # If previous frame or features are not initialized, initialize them
+    def perform_metrology_calculations(self, frame, trajectories, scaling_factor):
+        """Performs metrology calculations on a single frame, suitable for multiprocessing."""
+        # Check if the image is already grayscale
+        if len(frame.shape) == 2:  # Grayscale image
+            gray = frame
+        elif frame.shape[2] == 1:  # Single channel image
+            gray = frame
+        else:  # Convert to grayscale if it's not already
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
         if self.prev_gray is None:
-            # Initialize tracking features on the first frame
-            self.initialize_features(current_frame, False)
-            self.prev_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
-            return
+            self.prev_gray = gray
+            self.initialize_features(frame.copy(), False)  # Initialize features (lk_params, feature_params, prev_features)
+            return  # Skip calculations on the very first frame
 
-        # Convert the current frame to grayscale
-        current_gray = cv2.cvtColor(current_frame, cv2.COLOR_BGR2GRAY)
+        p1, st, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, self.prev_features, None, **self.lk_params)
 
-        # Check if previous features exist before calculating optical flow
-        if self.prev_features is None or self.prev_features.size == 0:
-            self.prev_features = cv2.goodFeaturesToTrack(
-                current_gray,
-                maxCorners=2000,
-                qualityLevel=0.01,
-                minDistance=5,
-                blockSize=5,
-                useHarrisDetector=True,
-                k=0.04
-            )
-            # Refine features to subpixel accuracy
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-            self.prev_features = cv2.cornerSubPix(
-                current_gray,
-                self.prev_features,
-                winSize=(5, 5),  # Search window size
-                zeroZone=(-1, -1),
-                criteria=criteria
-            )
-            self.prev_gray = current_gray  # Update previous frame
-            return  # Return to ensure that the code processes in next iteration with initialized features
+        if p1 is not None:
+            good_new = p1[st == 1]
+            good_old = self.prev_features[st == 1]
 
-        # Calculate optical flow using Lucas-Kanade method
-        current_features, status, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, current_gray, self.prev_features, None,
-                                                                 **self.lk_params)
+            results = []  # Store results for the current frame.
 
-        if current_features is None:  # handle the case when no features are found
-            self.prev_features = cv2.goodFeaturesToTrack(
-                current_gray,
-                maxCorners=2000,
-                qualityLevel=0.01,
-                minDistance=5,
-                blockSize=7  # Increased block size for better feature detection
-            )
-            self.prev_gray = current_gray
-            return
+            for i, (new, old) in enumerate(zip(good_new, good_old)):
+                a, b = new.ravel()
+                c, d = old.ravel()
 
-        updated_features = []
-        updated_ids = []
-        lost_ids = []  # Keep track of particle IDs that are lost
+                size = self.calculate_size(gray.copy(), new, i)  # Pass a copy to protect original
 
-        print(f"Frame {self.frame_number}:")  # Debug output
+                if size is not None:  # Log only if size calculation was successful
 
-        # Match previous features to current frame features
-        for i, (prev, curr) in enumerate(zip(self.prev_features, current_features)):
-            if status[i] == 1 and err[i] < 50:  # Status 1 means that the feature point was found in both frames,
-                # and err[i] is within acceptable range
+                    size_um = (size / scaling_factor) * 1000
+                    velocity = self.calculate_velocity(a, b, c, d)
+                    velocity_mm_per_s = velocity / scaling_factor
+                    x_mm = a / scaling_factor
+                    y_mm = b / scaling_factor
+                    trajectory_mm = []
+                    if i in trajectories:
+                        for x, y in trajectories[i]:
+                            trajectory_mm.append((x / scaling_factor, y / scaling_factor))
 
-                microsphere_id = self.microsphere_ids[i]
-                x_mm = curr[0][0] / self.scaling_factor  # Convert x-coordinate to mm
-                y_mm = curr[0][1] / self.scaling_factor  # Convert y-coordinate to mm
+                    self.microsphere_velocities[i] = velocity  # store velocity
+                    self.microsphere_sizes[i] = size
 
-                # Calculate the displacement in x and y directions
-                dx = curr[0][0] - prev[0][0]
-                dy = curr[0][1] - prev[0][1]
+                    results.append({
+                        "frame_number": self.frame_number,
+                        "particle_id": i,  # Use index as particle ID within the frame
+                        "x": x_mm,
+                        "y": y_mm,
+                        "size": size_um,
+                        "velocity": velocity_mm_per_s,
+                        "trajectory": trajectory_mm
+                    })
+            self.prev_features = good_new.reshape(-1, 1, 2)
 
-                # Calculate velocity using the separate function
-                velocity_mm_s = self.calculate_velocity(dx, dy)
+        else:
+            self.prev_gray = gray.copy()
+            return []
 
-                # Update positions and velocities
-                if microsphere_id not in self.microsphere_positions:
-                    self.microsphere_positions[microsphere_id] = []
-                if microsphere_id not in self.microsphere_velocities:
-                    self.microsphere_velocities[microsphere_id] = []
-
-                self.microsphere_positions[microsphere_id].append((x_mm, y_mm))
-                self.microsphere_velocities[microsphere_id].append(velocity_mm_s)
-
-                # Update the trajectory
-                if microsphere_id in self.trajectories:
-                    self.trajectories[microsphere_id].append((x_mm, y_mm))
-                else:
-                    self.trajectories[microsphere_id] = [(x_mm, y_mm)]
-
-                # Log the data to CSV
-                trajectory_mm = [(x / self.scaling_factor, y / self.scaling_factor) for x, y in
-                                 self.trajectories[microsphere_id]]
-                self.log_to_csv(self.frame_number, microsphere_id, x_mm, y_mm,
-                                self.microsphere_sizes.get(microsphere_id, 0), velocity_mm_s, trajectory_mm)
-
-                # Keep track of updated features and IDs
-                updated_features.append(curr)
-                updated_ids.append(microsphere_id)
-            else:
-                # If particle is lost, add its ID to the lost list ONLY if i is within range
-                if i < len(self.microsphere_ids):  # Check if the index is valid
-                    lost_ids.append(self.microsphere_ids[i])
-
-        # Remove trajectories of lost particles
-        self.remove_lost_particles(lost_ids)
-
-        # Update previous frame and features for the next iteration
-        self.prev_gray = current_gray
-        self.prev_features = np.array(updated_features, dtype=np.float32)
-        self.microsphere_ids = updated_ids
-
-        # Detect new features and add them if they don't overlap with existing ones
-        self.detect_new_particles(current_frame)
+        self.prev_gray = gray.copy()
+        return results
 
     def annotate_frame(self, frame):
         """Annotates the frame with particle IDs and trajectories."""
@@ -778,6 +689,45 @@ def is_contour_within_bounds(contour, frame_width, frame_height):
 
     # Ensure no part of the bounding box is outside the frame dimensions
     return x >= 0 and y >= 0 and (x + w) <= frame_width and (y + h) <= frame_height
+
+
+
+# Size Calculation Improvements
+
+
+    # if len(self.microsphere_sizes) > 0:
+    #     # Estimate average particle size (update based on ground truth or past frames)
+    #     average_size = np.mean([size for size in self.microsphere_sizes.values() if size > 0])
+    #     # Define a region of interest around the feature
+    #     roi_size = max(5, int(average_size // 3))
+    # else:
+    #     roi_size = 100
+
+    # x1, x2 = max(0, x - roi_size), min(gray_frame.shape[1], x + roi_size)
+    # y1, y2 = max(0, y - roi_size), min(gray_frame.shape[0], y + roi_size)
+    # roi = gray_frame[y1:y2, x1:x2]
+
+    # # Adaptive Thresholding for segmentation
+    # threshold_image = cv2.adaptiveThreshold(
+    #     gray_frame, 255,
+    #     cv2.ADAPTIVE_THRESH_GAUSSIAN_C,  # Gaussian-weighted mean for thresholding
+    #     cv2.THRESH_BINARY,
+    #     blockSize=11,  # Local neighborhood size
+    #     C=2  # Subtraction constant for fine-tuning
+    # )
+
+    # # Calculate contour area and perimeter
+    # area = cv2.contourArea(contour)
+    # perimeter = cv2.arcLength(contour, True)
+    #
+    # # # Filter out noise and irregular shapes
+    # # if area < 1 or area > 1000:  # Adjust these thresholds based on your images
+    # #     continue
+    #
+    # # Calculate circularity
+    # circularity = 4 * np.pi * area / (perimeter * perimeter)
+    # if circularity < 0.5:  # Filter non-circular objects
+    #     continue
 
 # # Initialize variables for selecting the appropriate contour
         # selected_contour = None
@@ -936,3 +886,120 @@ def is_contour_within_bounds(contour, frame_width, frame_height):
         #         (_, _), radius = cv2.minEnclosingCircle(contour)
         #         return radius * 2  # Diameter of the microsphere
         #     return 0
+
+    # """
+    #         Process the current frame to calculate velocities and sizes,
+    #         and write data to the CSV file.
+    #         """
+    # # Increment the frame number
+    # self.frame_number += 1
+    #
+    # # If previous frame or features are not initialized, initialize them
+    # if self.prev_gray is None:
+    #     # Initialize tracking features on the first frame
+    #     self.initialize_features(frame, False)
+    #     self.prev_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    #     return
+    #
+    # # Convert the current frame to grayscale
+    # current_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    #
+    # # Check if previous features exist before calculating optical flow
+    # if self.prev_features is None or self.prev_features.size == 0:
+    #     self.prev_features = cv2.goodFeaturesToTrack(
+    #         current_gray,
+    #         maxCorners=2000,
+    #         qualityLevel=0.01,
+    #         minDistance=5,
+    #         blockSize=5,
+    #         useHarrisDetector=True,
+    #         k=0.04
+    #     )
+    #     # Refine features to subpixel accuracy
+    #     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+    #     self.prev_features = cv2.cornerSubPix(
+    #         current_gray,
+    #         self.prev_features,
+    #         winSize=(5, 5),  # Search window size
+    #         zeroZone=(-1, -1),
+    #         criteria=criteria
+    #     )
+    #     self.prev_gray = current_gray  # Update previous frame
+    #     return  # Return to ensure that the code processes in next iteration with initialized features
+    #
+    # # Calculate optical flow using Lucas-Kanade method
+    # current_features, status, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, current_gray, self.prev_features, None,
+    #                                                          **self.lk_params)
+    #
+    # if current_features is None:  # handle the case when no features are found
+    #     self.prev_features = cv2.goodFeaturesToTrack(
+    #         current_gray,
+    #         maxCorners=2000,
+    #         qualityLevel=0.01,
+    #         minDistance=5,
+    #         blockSize=7  # Increased block size for better feature detection
+    #     )
+    #     self.prev_gray = current_gray
+    #     return
+    #
+    # updated_features = []
+    # updated_ids = []
+    # lost_ids = []  # Keep track of particle IDs that are lost
+    #
+    # print(f"Frame {self.frame_number}:")  # Debug output
+    #
+    # # Match previous features to current frame features
+    # for i, (prev, curr) in enumerate(zip(self.prev_features, current_features)):
+    #     if status[i] == 1 and err[i] < 50:  # Status 1 means that the feature point was found in both frames,
+    #         # and err[i] is within acceptable range
+    #
+    #         microsphere_id = self.microsphere_ids[i]
+    #         x_mm = curr[0][0] / self.scaling_factor  # Convert x-coordinate to mm
+    #         y_mm = curr[0][1] / self.scaling_factor  # Convert y-coordinate to mm
+    #
+    #         # Calculate the displacement in x and y directions
+    #         dx = curr[0][0] - prev[0][0]
+    #         dy = curr[0][1] - prev[0][1]
+    #
+    #         # Calculate velocity using the separate function
+    #         velocity_mm_s = self.calculate_velocity(dx, dy)
+    #
+    #         # Update positions and velocities
+    #         if microsphere_id not in self.microsphere_positions:
+    #             self.microsphere_positions[microsphere_id] = []
+    #         if microsphere_id not in self.microsphere_velocities:
+    #             self.microsphere_velocities[microsphere_id] = []
+    #
+    #         self.microsphere_positions[microsphere_id].append((x_mm, y_mm))
+    #         self.microsphere_velocities[microsphere_id].append(velocity_mm_s)
+    #
+    #         # Update the trajectory
+    #         if microsphere_id in self.trajectories:
+    #             self.trajectories[microsphere_id].append((x_mm, y_mm))
+    #         else:
+    #             self.trajectories[microsphere_id] = [(x_mm, y_mm)]
+    #
+    #         # Log the data to CSV
+    #         trajectory_mm = [(x / self.scaling_factor, y / self.scaling_factor) for x, y in
+    #                          self.trajectories[microsphere_id]]
+    #         self.log_to_csv(self.frame_number, microsphere_id, x_mm, y_mm,
+    #                         self.microsphere_sizes.get(microsphere_id, 0), velocity_mm_s, trajectory_mm)
+    #
+    #         # Keep track of updated features and IDs
+    #         updated_features.append(curr)
+    #         updated_ids.append(microsphere_id)
+    #     else:
+    #         # If particle is lost, add its ID to the lost list ONLY if i is within range
+    #         if i < len(self.microsphere_ids):  # Check if the index is valid
+    #             lost_ids.append(self.microsphere_ids[i])
+    #
+    # # Remove trajectories of lost particles
+    # self.remove_lost_particles(lost_ids)
+    #
+    # # Update previous frame and features for the next iteration
+    # self.prev_gray = current_gray
+    # self.prev_features = np.array(updated_features, dtype=np.float32)
+    # self.microsphere_ids = updated_ids
+    #
+    # # Detect new features and add them if they don't overlap with existing ones
+    # self.detect_new_particles(frame)

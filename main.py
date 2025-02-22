@@ -1,16 +1,11 @@
 import json
-
 import cv2
-import time
 import logging
 import numpy as np
-import pandas as pd
-import random
-import sys
 import os
+import sys
 from OpticalMetrologyModule import OpticalMetrologyModule
 from VideoProcessor import VideoProcessor
-from PyQt5 import uic
 from PyQt5.QtWidgets import QMainWindow, QMessageBox, QDialog, QApplication, QFileDialog, QLabel, QPushButton, QVBoxLayout, QWidget
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen
 from PyQt5.QtCore import Qt, QTimer, QPointF
@@ -20,9 +15,11 @@ from videoCalibration import *
 from graphWindow import *
 from calibration import *
 from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
-from PySide6 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 from pyqtgraph import PlotWidget
+from PyQt5 import QtCore, QtWidgets
+
+
 
 # Set up logging configuration.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -64,7 +61,7 @@ class MainWindow(QMainWindow):
 
         # Camera initialization
         self.camera_dialog = VideoCalibrationDialog(self)
-        self.graph_window = GraphWindow(self)
+        # self.graph_window = GraphWindow(self)
         self.calibration_dialog = None
         self.optical_metrology_module = OpticalMetrologyModule(debug=False, parent_ui=self.ui)
 
@@ -108,7 +105,7 @@ class MainWindow(QMainWindow):
         self.ui.cameraBtn.clicked.connect(self.open_video_calibration_dialog)
         self.ui.graphBtn.clicked.connect(self.open_graph_window)
 
-        self.saveDataCheckBox.stateChanged.connect(self.on_save_data_checkbox_changed)
+        self.ui.saveDataCheckBox.stateChanged.connect(self.on_save_data_checkbox_changed)
 
     def open_video_calibration_dialog(self):
         # Show the dialog (modal, blocks interaction with the main window)
@@ -135,49 +132,41 @@ class MainWindow(QMainWindow):
 ########################################################################################
 # GRAPH WINDOW CLASS
 ########################################################################################
-class GraphWindow(QMainWindow):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        uic.loadUi("SizeandVelocityGraph.ui", self)
-        # self.ui = Ui_GraphWindow()
-        # self.ui.setupUi(self)
-
-        self.size_graph = self.findChild(PlotWidget, "sizeGraphWidget")
-        # self.size_graph.showGrid(x=True, y=True)
-        #
-        self.velocity_graph = self.findChild(PlotWidget, "velocityGraphWidget")
-        # self.velocity_graph.showGrid(x=True, y=True)
-        # Initialize the plot widgets with correct parent
-        # self.size_graph = pg.PlotWidget(parent=self.findChild(QtWidgets.QWidget, "sizeGraphWidget"))
-        # self.velocity_graph = pg.PlotWidget(parent=self.findChild(QtWidgets.QWidget, "velocityGraphWidget"))
-
-        # self.show()
-
-        # Set up the plot widgets
-        # self.setup_plots()
-
-    def setup_plots(self):
-        # Configure size graph
-        self.size_graph.setBackground('w')
-        self.size_graph.setLabel("bottom", "Particle Size (px)")
-        self.size_graph.setLabel("left", "Frequency")
-        self.size_graph.showGrid(x=True, y=True)
-
-        # Configure velocity graph
-        self.velocity_graph.setBackground('w')
-        self.velocity_graph.setLabel("bottom", "Velocity (px/frame)")
-        self.velocity_graph.setLabel("left", "Frequency")
-        self.velocity_graph.showGrid(x=True, y=True)
-
-
-    def update_graphs(self):
-        # Update size graph
-        self.size_graph.clear()
-        self.size_graph.plot(self.size_data, pen='b', symbol='o')
-
-        # Update velocity graph
-        self.velocity_graph.clear()
-        self.velocity_graph.plot(self.velocity_data, pen='r', symbol='x')
+# class GraphWindow(QMainWindow):
+#     def __init__(self, parent=None):
+#         super().__init__(parent)
+#         self.ui = uic.loadUi("SizeandVelocityGraph.ui", self)
+#
+#
+#         self.size_graph = self.findChild(PlotWidget, "sizeGraphWidget")
+#         self.velocity_graph = self.findChild(PlotWidget, "velocityGraphWidget")
+#         # self.show()
+#         # Set up the plot widgets
+#         self.setup_plots()
+#
+#
+#     def setup_plots(self):
+#         # Configure size graph
+#         self.size_graph.setBackground('w')
+#         self.size_graph.setLabel("bottom", "Particle Size (px)")
+#         self.size_graph.setLabel("left", "Frequency")
+#         self.size_graph.showGrid(x=True, y=True)
+#
+#         # Configure velocity graph
+#         self.velocity_graph.setBackground('w')
+#         self.velocity_graph.setLabel("bottom", "Velocity (px/frame)")
+#         self.velocity_graph.setLabel("left", "Frequency")
+#         self.velocity_graph.showGrid(x=True, y=True)
+#
+#
+#     def update_graphs(self):
+#         # Update size graph
+#         self.size_graph.clear()
+#         self.size_graph.plot(self.size_data, pen='b', symbol='o')
+#
+#         # Update velocity graph
+#         self.velocity_graph.clear()
+#         self.velocity_graph.plot(self.velocity_data, pen='r', symbol='x')
 
 ########################################################################################
 # CALIBRATION DIALOG CLASS
@@ -427,7 +416,7 @@ class VideoCalibrationDialog(QDialog):
 
     def update_video_feed(self):
         """Fetch the video frame from VideoProcessor and display it."""
-        frame = self.video_processor.process_frame()
+        frame = self.video_processor.track_particles()
         if frame is not None:
             # Convert OpenCV frame to QImage
             rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -663,7 +652,7 @@ def main():
 
         def update_video():
             # Process the next frame in VideoProcessor
-            processed_frame = video_processor.process_frame()
+            processed_frame = video_processor.track_particles()
             if processed_frame is None:
                 timer.stop()  # Stop the timer if no frames are returned
                 return

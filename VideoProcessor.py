@@ -26,12 +26,16 @@ def load_pixels_per_mm(config_path="../config.json"):
 
 class VideoProcessor:
     def __init__(self, ui_video_label, input_mode="file", video_source=None, save_data_enabled=False):
+
         self.save_data_enabled = save_data_enabled
 
         # Create a temporary CSV file for testing
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_csv = f"test_particle_data_{timestamp}.csv"
-        self.optical_metrology_module = OpticalMetrologyModule(debug=False, output_csv=output_csv)
+        if save_data_enabled:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_csv = f"test_particle_data_{timestamp}.csv"
+            self.optical_metrology_module = OpticalMetrologyModule(debug=False, output_csv=output_csv)
+        else:
+            self.optical_metrology_module = OpticalMetrologyModule(debug=False)
 
         self.ui_video_label = ui_video_label
         self.input_mode = input_mode
@@ -49,17 +53,19 @@ class VideoProcessor:
                 configure_path = None
         elif input_mode == "file" and video_source is not None:
             self.camera = cv2.VideoCapture(video_source)
-            self.fps = self.camera.get(cv2.CAP_PROP_FPS)
+
         else:
             raise ValueError("Invalid input_mode.Use 'file' or 'live', and provide a valid video_source for file input.")
 
+        self.fps = self.camera.get(cv2.CAP_PROP_FPS)
         self.mask = None
         self.scaling_factor = load_pixels_per_mm()
         self.frame_count = 0
         self.start_time = time.time()
-        self.particle_colors = []
+        self.particle_colors = {}
         self.trajectories = {}
         self.id_mapping = {}
+        self.particle_sizes = {}  # Dictionary to store sizes
         self.old_gray = None
         self.p0 = None
 
@@ -123,7 +129,7 @@ class VideoProcessor:
 
     def initialize_tracking(self):
         """Initialize the particle tracking by capturing the initial frame."""
-        frame = self._get_frame()
+        frame = self.get_frame()
         if frame is None:
             print("Error: Unable to retrieve the initial frame.")
             return False
@@ -134,13 +140,13 @@ class VideoProcessor:
         # Detect initial particle features
         self.p0 = cv2.goodFeaturesToTrack(self.old_gray, mask=None, **self.feature_params)
         if self.p0 is not None:
-            # Assign random colors to features
-            self.particle_colors = [self.get_random_color() for _ in range(len(self.p0))]
+            # Assign random colors to features using a dictionary
+            self.particle_colors = {i: self.get_random_color() for i in range(len(self.p0))}
         # Initialize the mask for drawing trajectories
         self.mask = np.zeros_like(frame)
         return True
 
-    def _get_frame(self):
+    def get_frame(self):
         """Retrieve a frame from the ThorCam camera, process it into RGB format."""
 
         if self.input_mode == "live":
@@ -170,118 +176,163 @@ class VideoProcessor:
     def get_random_color():
         return random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
 
-    def process_frame(self, save_data_enabled=False):
-        """Process frame, update particle trajectories, and draw on mask."""
+    def track_particles(self, frame):
+        """Tracks particles on a frame, suitable for multiprocessing."""
 
-        frame = self._get_frame()
-        if frame is None:
-            print("Error: Could not grab frame.")
-            return None
-
-        self.frame_count += 1
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Reset the mask for the current frame
-        self.mask = np.zeros_like(frame)
-
-        # 1. Manage Lost Particles and Update Trajectories
         new_p0 = []
-        new_id_mapping = {}
-        particle_sizes = {}  # Dictionary to store sizes
+        new_id_mapping = self.id_mapping.copy()
+        new_trajectories = self.trajectories.copy()
+        new_particle_colors = self.particle_colors.copy()
+        mask = self.mask.copy()  # Assuming self.mask is initialized earlier, for example, in the initializer or get_frame
+        old_gray = self.old_gray
+        p0 = self.p0
 
-        if self.p0 is not None:
-            p1, st, err = cv2.calcOpticalFlowPyrLK(self.old_gray, frame_gray, self.p0, None, **self.lk_params)
+        if p0 is not None and len(p0) > 0:
+                p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **self.lk_params)
 
-            if p1 is not None:
-                for i, (new, old) in enumerate(zip(p1, self.p0)):
-                    a, b = new.ravel()
-                    particle_id = self.id_mapping.get(tuple(old.ravel()))  # Use existing ID
+                if p1 is not None:
+                    p1_2d = p1.reshape(-1, 2)
+                    p0_2d = p0.reshape(-1, 2)
 
-                    if particle_id is not None and st[i, 0] == 1:  # Check tracking status
-                        new_id_mapping[(a, b)] = particle_id  # Update position in ID mapping
-                        new_p0.append(new)  # Keep for next frame
+                    for i, (new, old) in enumerate(zip(p1_2d, p0_2d)):
+                        particle_id = new_id_mapping.get(tuple(old))
 
-                        # Draw trajectory (last 10 points)
-                        if particle_id in self.trajectories:
-                            self.trajectories[particle_id].append((a, b))
-                        else:
-                            self.trajectories[particle_id] = [(a, b)]  # Initialize if new
+                        if particle_id is not None and st[i, 0] == 1:
+                            new_id_mapping[tuple(new)] = particle_id
+                            new_p0.append(new)
 
-                        # Size Calculation (for existing particles)
-                        size = self.optical_metrology_module.calculate_size(frame.copy(), (a, b),
-                                                                            particle_id)
-                        if size is not None:
-                            size_um = (size / self.scaling_factor) * 1000  # Store in microns
-                            particle_sizes[particle_id] = size_um  # Store size
+                            if particle_id in new_trajectories:
+                                new_trajectories[particle_id].append(tuple(new))
+                            else:
+                                new_trajectories[particle_id] = [tuple(new)]
 
-                        self.trajectories[particle_id] = self.trajectories[particle_id][-30:]
-                        for k in range(1, len(self.trajectories[particle_id])):
-                            pt1 = self.trajectories[particle_id][k - 1]
-                            pt2 = self.trajectories[particle_id][k]
-                            cv2.line(self.mask, (int(pt1[0]), int(pt1[1])),
-                                     (int(pt2[0]), int(pt2[1])),
-                                     self.particle_colors[particle_id], 2)
+                            new_trajectories[particle_id] = new_trajectories[particle_id][-30:]
 
-            self.p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
-            self.id_mapping = new_id_mapping  # Update the ID mapping
+                            for k in range(1, len(new_trajectories[particle_id])):
+                                pt1 = new_trajectories[particle_id][k - 1]
+                                pt2 = new_trajectories[particle_id][k]
+                                cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
+                                         new_particle_colors[particle_id], 1)
 
-        # 2. Detect New Particles and Assign Unique IDs
-        if self.frame_count % 10 == 0 or self.p0 is None:  # Detect new features periodically
-            new_features = cv2.goodFeaturesToTrack(frame_gray, mask=None, **self.feature_params)
-            if new_features is not None:
-                for new in new_features:
-                    a, b = new.ravel()
+        if new_p0:  # check to ensure that if new_p0 is not empty, it is reshaped into a numpy array
+            new_p0 = np.array(new_p0).reshape(-1, 1, 2)
+        return frame, frame_gray, new_p0, new_trajectories, new_particle_colors, new_id_mapping
 
-                    if (a, b) not in self.id_mapping:  # Don't create a duplicate particle
-                        particle_id = len(self.particle_colors)  # increment ID
-                        self.particle_colors.append(self.get_random_color())
-                        self.trajectories[particle_id] = [(a, b)] # Initialize trajectories
-                        self.id_mapping[(a, b)] = particle_id  # Create new particle
-                        size = self.optical_metrology_module.calculate_size(frame.copy(),(a, b),
-                                                                            particle_id)  # Size for new particles
-                        if size is not None:
-                            size_um = (size / self.scaling_factor) * 1000  # Convert and store size for new particles
-                            particle_sizes[particle_id] = size_um
 
-                        if self.p0 is not None:
-                            self.p0 = np.vstack((self.p0, new.reshape(-1, 1, 2)))
-                        else:
-                            self.p0 = new.reshape(-1, 1, 2)
+    # def process_frame(self, save_data_enabled=False):
+    #     """Process frame, update particle trajectories, and draw on mask."""
+    #
+    #     frame = self._get_frame()
+    #     if frame is None:
+    #         return
+    #
+    #     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    #     self.frame_count += 1
+    #     self.mask = np.zeros_like(frame) # Reset the mask for the current frame
+    #
+    #     # 1. Manage Lost Particles and Update Trajectories
+    #     new_p0 = []
+    #     new_id_mapping = {}
+    #
+    #     if self.p0 is not None:
+    #         p1, st, err = cv2.calcOpticalFlowPyrLK(self.old_gray, frame_gray, self.p0, None, **self.lk_params)
+    #
+    #         if p1 is not None:
+    #             # Convert p1 and p0 to 2D arrays for easier processing
+    #             p1_2d = p1.reshape(-1, 2)
+    #             p0_2d = self.p0.reshape(-1, 2)
+    #
+    #             for i, (new, old) in enumerate(zip(p1_2d, p0_2d)):
+    #                 particle_id = self.id_mapping.get(tuple(old))
+    #
+    #                 if particle_id is not None and st[i, 0] == 1:  # Check tracking status
+    #                     new_id_mapping[tuple(new)] = particle_id  # Update position in ID mapping
+    #                     new_p0.append(new)  # Keep for next frame
+    #
+    #                     # Draw trajectory (last 10 points)
+    #                     if particle_id in self.trajectories:
+    #                         self.trajectories[particle_id].append(tuple(new))
+    #                     else:
+    #                         self.trajectories[particle_id] = [tuple(new)]  # Initialize if new
+    #
+    #                     self.trajectories[particle_id] = self.trajectories[particle_id][-30:]
+    #                     for k in range(1, len(self.trajectories[particle_id])):
+    #                         pt1 = self.trajectories[particle_id][k - 1]
+    #                         pt2 = self.trajectories[particle_id][k]
+    #                         cv2.line(self.mask, (int(pt1[0]), int(pt1[1])),
+    #                                  (int(pt2[0]), int(pt2[1])),
+    #                                  self.particle_colors[particle_id], 1)
+    #         self.id_mapping = new_id_mapping
+    #         self.p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
+    #
+    #     # 2. Detect New Particles and Assign Unique IDs
+    #     if self.frame_count % 10 == 0 or self.p0 is None:  # Detect new features periodically
+    #         new_features = cv2.goodFeaturesToTrack(frame_gray, mask=None, **self.feature_params)
+    #         if new_features is not None:
+    #             new_features_2d = new_features.reshape(-1, 2)
+    #             for new in new_features_2d:
+    #                 if tuple(new) not in self.id_mapping:  # Don't create a duplicate particle
+    #                     particle_id = len(self.particle_colors)  # increment ID
+    #                     self.particle_colors[particle_id] = self.get_random_color()
+    #                     self.trajectories[particle_id] = [tuple(new)] # Initialize trajectories
+    #                     self.id_mapping[tuple(new)] = particle_id  # Create new particle
+    #
+    #                     if self.p0 is not None:
+    #                         self.p0 = np.vstack((self.p0, new.reshape(-1, 1, 2)))
+    #                     else:
+    #                         self.p0 = new.reshape(-1, 1, 2)
+    #
+    #     output = cv2.add(frame, self.mask)
+    #
+    #     self.old_gray = frame_gray.copy()
+    #     return output
+    #
 
-        output = cv2.add(frame, self.mask)
+    # # Size Calculation (for existing particles)
+    # size = self.optical_metrology_module.calculate_size(frame.copy(), (a, b),
+    #                                                     particle_id)
+    # if size is not None:
+    #     size_um = (size / self.scaling_factor) * 1000  # Store in microns
+    #     self.particle_sizes[particle_id] = size_um  # Store size
 
-        # # Display information (ID, velocity, size) on the frame *after* drawing trajectories:
-        if self.p0 is not None:  # Check if particles are being tracked
-            # Create a copy of trajectories keys for safe iteration while modifying
-            tracked_particle_ids = list(self.trajectories.keys())
+    # size = self.optical_metrology_module.calculate_size(frame.copy(),(a, b),
+    #                                                     particle_id)  # Size for new particles
+    # if size is not None:
+    #     size_um = (size / self.scaling_factor) * 1000  # Convert and store size for new particles
+    #     self.particle_sizes[particle_id] = size_um
 
-            for particle_id in tracked_particle_ids:  # Use copy of keys here
-                if particle_id in self.id_mapping.values():  # Check if still tracked
-                    velocity = self.optical_metrology_module.calculate_velocity(self.trajectories[particle_id])
-                    x, y = self.trajectories[particle_id][-1]
-                    # Convert velocity to mm/s
-                    velocity_mm_per_s = velocity / self.scaling_factor
-
-                    size_um = particle_sizes.get(particle_id)
-                    if size_um is not None:
-                        if self.save_data_enabled:  # Write data if enabled
-                            frame_number = self.frame_count
-                            trajectory_mm = [(point[0] / self.scaling_factor, point[1] / self.scaling_factor) for point in self.trajectories[particle_id]]
-                            x_mm = x / self.scaling_factor
-                            y_mm = y / self.scaling_factor
-                            self.optical_metrology_module.log_to_csv(frame_number, particle_id, x_mm, y_mm, size_um,
-                                                                     velocity_mm_per_s, trajectory_mm, save_data_enabled)
-                        print(f"Particle ID: {particle_id}, Size: {size_um:.3f} um, Velocity: {velocity_mm_per_s:.2f} mm/s")
-                        cv2.putText(output, f"ID:{particle_id}", (int(x) + 5, int(y) + 5),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.particle_colors[particle_id], 1)
-                else:  # Particle is no longer tracked (removed from ID mapping)
-                    del self.trajectories[particle_id]  # Remove trajectory from list
-                    # Remove particles from self.po
-                    indices_to_remove = []
-                    for i, (new, old) in enumerate(zip(self.p0, self.p0)):
-                        existing_particle_id = self.id_mapping.get(tuple(old.ravel()))  # Use existing ID
-                        if particle_id == existing_particle_id:
-                            indices_to_remove.append(i)
-                    self.p0 = np.delete(self.p0, indices_to_remove, axis=0)
-        self.old_gray = frame_gray.copy()
-        return output
+    # # Display information (ID, velocity, size) on the frame *after* drawing trajectories:
+    # if self.p0 is not None:  # Check if particles are being tracked
+    #     # Create a copy of trajectories keys for safe iteration while modifying
+    #     tracked_particle_ids = list(self.trajectories.keys())
+    #
+    #     for particle_id in tracked_particle_ids:  # Use copy of keys here
+    #         if particle_id in self.id_mapping.values():  # Check if still tracked
+    #             velocity = self.optical_metrology_module.calculate_velocity(self.trajectories[particle_id])
+    #             x, y = self.trajectories[particle_id][-1]
+    #             # Convert velocity to mm/s
+    #             velocity_mm_per_s = velocity / self.scaling_factor
+    #
+    #             size_um = self.particle_sizes.get(particle_id)
+    #             if size_um is not None:
+    #                 if self.save_data_enabled:  # Write data if enabled
+    #                     frame_number = self.frame_count
+    #                     trajectory_mm = [(float(point[0] / self.scaling_factor), float(point[1] / self.scaling_factor)) for point in self.trajectories[particle_id]]
+    #                     x_mm = x / self.scaling_factor
+    #                     y_mm = y / self.scaling_factor
+    #                     self.optical_metrology_module.log_to_csv(frame_number, particle_id, x_mm, y_mm, size_um,
+    #                                                              velocity_mm_per_s, trajectory_mm, save_data_enabled)
+    #                 print(f"Particle ID: {particle_id}, Size: {size_um:.3f} um, Velocity: {velocity_mm_per_s:.2f} mm/s")
+    #                 cv2.putText(output, f"ID:{particle_id}", (int(x) + 5, int(y) + 5),
+    #                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.particle_colors[particle_id], 1)
+    #         else:  # Particle is no longer tracked (removed from ID mapping)
+    #             del self.trajectories[particle_id]  # Remove trajectory from list
+    #             # Remove particles from self.po
+    #             indices_to_remove = []
+    #             for i, (new, old) in enumerate(zip(self.p0, self.p0)):
+    #                 existing_particle_id = self.id_mapping.get(tuple(old.ravel()))  # Use existing ID
+    #                 if particle_id == existing_particle_id:
+    #                     indices_to_remove.append(i)
+    #             self.p0 = np.delete(self.p0, indices_to_remove, axis=0)

@@ -32,7 +32,7 @@ def main():
     while True:
         start_time = time.time()  # Start time for frame processing
         # Process the next frame
-        processed_frame = video_processor.process_frame(save_data_enabled=True)
+        processed_frame = video_processor.track_particles(save_data_enabled=True)
         end_time = time.time()  # End time for frame processing
         processing_time = end_time - start_time
 

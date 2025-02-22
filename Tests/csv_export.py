@@ -1,3 +1,5 @@
+import queue
+
 import cv2
 import datetime
 import os
@@ -5,10 +7,26 @@ import pandas as pd
 from VideoProcessor import VideoProcessor
 from OpticalMetrologyModule import OpticalMetrologyModule
 
+def play_video(video_path):
+    """Plays the video in a separate thread."""
+    cap = cv2.VideoCapture(video_path)
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        cv2.imshow('Video Playback', frame)  # Display the video
+        if cv2.waitKey(25) & 0xFF == ord('q'):  # Press 'q' to exit video playback early
+            break
+    cap.release()
+    cv2.destroyAllWindows()
+
 
 def test_csv_output():
     # Path to the test video file (replace with your test video)
     video_path = "../Test Data/Videos/MicrosphereVideo3.avi"
+
+    # video_thread = threading.Thread(target=play_video, args=(video_path,))
+    # video_thread.start()  # Start video playback in a separate thread
 
     # Create a temporary CSV file for testing
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -32,16 +50,17 @@ def test_csv_output():
         optical_metrology_module.initialize_csv()
 
         # Process a few frames (adjust the number as needed)
-        num_frames_to_process = 10
+        num_frames_to_process = 30
         # Get the actual number of frames
         actual_frame_count = int(video_processor.camera.get(cv2.CAP_PROP_FRAME_COUNT))
         num_frames_to_process = min(num_frames_to_process, actual_frame_count)
 
         for _ in range(num_frames_to_process):
-            processed_frame = video_processor.process_frame(save_data_enabled=True)
+            processed_frame = video_processor.track_particles(save_data_enabled=True)
             if processed_frame is None:
                 print("End of video or error occurred prematurely.")
                 return False
+
 
         # Verify CSV file contents
         # Check if the file exists and has data
@@ -101,6 +120,8 @@ def test_csv_output():
         # Clean up: Release resources, close windows, delete the temporary file
         video_processor.camera.release()
         cv2.destroyAllWindows()
+        # video_thread.join()  # Wait for the video thread to finish
+
         os.remove(output_csv)
 
 
