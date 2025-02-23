@@ -10,13 +10,21 @@ from VideoProcessor import VideoProcessor
 from OpticalMetrologyModule import OpticalMetrologyModule
 
 
-def run_multiprocessing(input_queue, output_array, lock, event, video_path, output_csv_path):
+def run_multiprocessing(input_queue, output_array, overlay_shared, lock, event, video_path, output_csv_path, frame_shape,
+                        id_mapping, particle_colors, trajectories):
     video_processor_local = VideoProcessor(ui_video_label=None, input_mode="file", video_source=video_path,
-                                           save_data_enabled=True)
+                                           save_data_enabled=True,
+                                           id_mapping=id_mapping,  # Pass shared dictionaries
+                                           particle_colors=particle_colors,  # Pass shared dictionaries
+                                           trajectories=trajectories)
     video_processor_local.initialize_tracking()
 
-    video_processor_local.optical_metrology_module = OpticalMetrologyModule(parent_ui=None,
+    video_processor_local.optical_metrology_module = OpticalMetrologyModule(output_csv=output_csv_path, parent_ui=None,
                                                                             debug=False)
+
+    # # Initialize overlay here, once
+    # ret, frame = video_processor_local.camera.read()
+    # overlay = np.zeros_like(frame)
 
     while True:
         frame_data = input_queue.get()
@@ -25,11 +33,17 @@ def run_multiprocessing(input_queue, output_array, lock, event, video_path, outp
             break
 
         frame_number, frame = frame_data
-        output, frame_gray, new_p0, new_trajectories, new_particle_colors, new_id_mapping, updated_mask = video_processor_local.track_particles(
-            frame)
+        output, frame_gray, new_p0, new_particle_colors, new_id_mapping, _ = video_processor_local.track_particles(
+            frame, lock, trajectories, particle_colors, id_mapping)
+
+        particle_colors.update(new_particle_colors)
+        id_mapping.update(new_id_mapping)
+
+        video_processor_local.particle_colors = new_particle_colors.copy()  # Update Instance variable particle_colors
+        video_processor_local.id_mapping = new_id_mapping.copy()
 
         results = video_processor_local.optical_metrology_module.perform_metrology_calculations(output,
-                                                                                                new_trajectories,
+                                                                                                trajectories,
                                                                                                 video_processor_local.scaling_factor)
         if results:
             for result in results:
@@ -37,6 +51,33 @@ def run_multiprocessing(input_queue, output_array, lock, event, video_path, outp
                                                                           save_data_enabled=video_processor_local.save_data_enabled)  # Log data as it's processed
 
         with lock:  # Acquire lock before writing to shared array
+            print("inside with lock")
+            overlay = np.frombuffer(overlay_shared.get_obj(), dtype=np.uint8).reshape(frame_shape)  # Access shared overlay
+            overlay[:] = 0
+
+            # # Access shared data with the lock acquired
+            # local_trajectories = trajectories.copy()
+            # local_particle_colors = particle_colors.copy()
+
+            # Check if new_trajectories and new_particle_colors is none
+            if trajectories:
+                print("inside if local_trajectories")
+                for particle_id, trajectory in trajectories.items():
+                    print(f"The length of the trajectory is {len(trajectory)}")
+                    if particle_id in particle_colors and len(trajectory) > 1:
+                        trajectory_points = [(int(pt[0]), int(pt[1])) for pt in trajectory]
+
+                        print("inside if particle_id in local_particle_colors and len(trajectory) > 1:")
+                        for k in range(1, len(trajectory)):
+                            print("inside for k in range(1, len(trajectory)):")
+                            pt1 = trajectory_points[k - 1]
+                            pt2 = trajectory_points[k]
+                            color = particle_colors[particle_id]
+
+                            cv2.line(overlay, pt1, pt2, color, 2)
+
+            output = cv2.addWeighted(frame, 1, overlay, 1, 0)
+
             output_array[frame_number] = output.copy()
 
         # mask_queue.put(updated_mask.copy())  # Put a copy of the mask into the queue
@@ -45,9 +86,9 @@ def run_multiprocessing(input_queue, output_array, lock, event, video_path, outp
 
         video_processor_local.old_gray = frame_gray
         video_processor_local.p0 = new_p0
-        video_processor_local.trajectories = new_trajectories
-        video_processor_local.particle_colors = new_particle_colors
-        video_processor_local.id_mapping = new_id_mapping
+        # video_processor_local.trajectories = new_trajectories
+        # video_processor_local.particle_colors = new_particle_colors
+        # video_processor_local.id_mapping = new_id_mapping
 
 
 def video_processing_thread(input_queue, video_path, num_processes):
@@ -114,9 +155,19 @@ def main():
         output_array = manager.list([None] * frame_count)  # manager for shared state
         lock = manager.Lock()
         event = manager.Event()
+        # Shared memory for overlay
+        overlay_shared = mp.Array('B', frame.size * frame.itemsize)  # Shared overlay
+
+        shared_id_mapping = manager.dict()
+        shared_particle_colors = manager.dict()
+        shared_trajectories = manager.dict()
+
+        overlay = np.frombuffer(overlay_shared.get_obj(), dtype=np.uint8).reshape(frame.shape)
+        overlay[:] = 0  # Initialize as black
 
         calculation_processes = [mp.Process(target=run_multiprocessing,
-                                            args=(input_queue, output_array, lock, event, video_path, output_csv_path)) for _ in range(num_processes)]
+                                            args=(input_queue, output_array, overlay_shared, lock, event, video_path, output_csv_path, frame.shape,
+                                                  shared_id_mapping, shared_particle_colors, shared_trajectories)) for _ in range(num_processes)]
 
         for p in calculation_processes:
             p.start()
