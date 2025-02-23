@@ -187,7 +187,7 @@ class VideoProcessor:
     def get_random_color():
         return random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
 
-    def track_particles(self, frame, lock, trajectories, particle_colors, id_mapping):
+    def track_particles(self, frame, trajectories, particle_colors, id_mapping):
         """Tracks particles on a frame, suitable for multiprocessing."""
         print("inside track_particles!")
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -211,34 +211,33 @@ class VideoProcessor:
                 good_new = p1[st == 1]
                 good_old = self.p0[st == 1]
 
-                with lock:
-                    # Update trajectories for successfully tracked particles
-                    for i, (new, old) in enumerate(zip(good_new, good_old)):
-                        old_point = tuple(old.ravel())
-                        new_point = tuple(new.ravel())
+                # Update trajectories for successfully tracked particles
+                for i, (new, old) in enumerate(zip(good_new, good_old)):
+                    old_point = tuple(old.ravel())
+                    new_point = tuple(new.ravel())
 
-                        # Get particle ID from the old point
-                        particle_id = self.id_mapping.get(old_point)
+                    # Get particle ID from the old point
+                    particle_id = self.id_mapping.get(old_point)
 
-                        if particle_id is not None:
-                            # Update ID mapping for the new point
-                            id_mapping[new_point] = particle_id
-                            del id_mapping[old_point]  # Remove old point mapping
+                    if particle_id is not None:
+                        # Update ID mapping for the new point
+                        id_mapping[new_point] = particle_id
+                        del id_mapping[old_point]  # Remove old point mapping
 
-                            # Update or initialize trajectory
-                            if particle_id not in trajectories:
-                                trajectories[particle_id] = []
-                            trajectories[particle_id].append(new_point)
+                        # Update or initialize trajectory
+                        if particle_id not in trajectories:
+                            trajectories[particle_id] = []
+                        trajectories[particle_id].append(new_point)
 
-                            # Keep only the last 30 points in the trajectory
-                            trajectories[particle_id] = trajectories[particle_id][-30:]
+                        # Keep only the last 30 points in the trajectory
+                        trajectories[particle_id] = trajectories[particle_id][-30:]
 
-                            # Add the new point to track in next frame
-                            new_p0.append(new)
+                        # Add the new point to track in next frame
+                        new_p0.append(new)
 
-                            # Ensure particle has a color assigned
-                            if particle_id not in particle_colors:
-                                particle_colors[particle_id] = self.get_random_color()
+                        # Ensure particle has a color assigned
+                        if particle_id not in particle_colors:
+                            particle_colors[particle_id] = self.get_random_color()
 
             # 2. Detect new particles if needed
             if len(new_p0) < 20:  # If we're tracking fewer than 20 particles
@@ -261,23 +260,22 @@ class VideoProcessor:
                 new_features = cv2.goodFeaturesToTrack(frame_gray, mask=mask, **self.feature_params)
 
                 if new_features is not None:
-                    with lock:
-                        for new_feature in new_features:
-                            # Ensure consistent shape (1, 2) for all points
-                            new_feature = new_feature.reshape(1, 2)
-                            new_point = tuple(new_feature.ravel())
+                    for new_feature in new_features:
+                        # Ensure consistent shape (1, 2) for all points
+                        new_feature = new_feature.reshape(1, 2)
+                        new_point = tuple(new_feature.ravel())
 
-                            # Only add if this point isn't already being tracked
-                            if new_point not in id_mapping:
-                                # Generate new particle ID
-                                particle_id = max(trajectories.keys(), default=-1) + 1
+                        # Only add if this point isn't already being tracked
+                        if new_point not in id_mapping:
+                            # Generate new particle ID
+                            particle_id = max(trajectories.keys(), default=-1) + 1
 
-                                # Initialize new particle tracking
-                                id_mapping[new_point] = particle_id
-                                particle_colors[particle_id] = self.get_random_color()
-                                trajectories[particle_id] = [new_point]
+                            # Initialize new particle tracking
+                            id_mapping[new_point] = particle_id
+                            particle_colors[particle_id] = self.get_random_color()
+                            trajectories[particle_id] = [new_point]
 
-                                new_p0.append(new_feature.reshape(1, 2))
+                            new_p0.append(new_feature.reshape(1, 2))
 
 
             # 3. Update tracking points for next frame
@@ -293,24 +291,48 @@ class VideoProcessor:
 
             # 4. Draw current particle positions on frame
             output = frame.copy()
-            with lock:
-                for point in new_p0:
-                    # Convert the point coordinates properly
-                    pt = (int(point[0][0]), int(point[0][1])) if point.shape == (1, 2) else (
-                    int(point[0]), int(point[1]))
+            for point in new_p0:
+                # Convert the point coordinates properly
+                pt = (int(point[0][0]), int(point[0][1])) if point.shape == (1, 2) else (
+                int(point[0]), int(point[1]))
 
-                    particle_id = id_mapping.get(tuple(point.ravel()))
-                    if particle_id is not None and particle_id in particle_colors:
-                        color = particle_colors[particle_id]
-                        cv2.circle(output, pt, 5, color, -1)  # Draw filled circle for current position
+                particle_id = id_mapping.get(tuple(point.ravel()))
+                if particle_id is not None and particle_id in particle_colors:
+                    color = particle_colors[particle_id]
+                    cv2.circle(output, pt, 5, color, -1)  # Draw filled circle for current position
 
-                        # Add particle ID text
-                        cv2.putText(output, f'ID: {particle_id}',
-                                    (pt[0] + 10, pt[1] - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                    # Add particle ID text
+                    cv2.putText(output, f'ID: {particle_id}',
+                                (pt[0] + 10, pt[1] - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
             return output, frame_gray, self.p0, particle_colors, id_mapping, None
 
+    def display_trajectories(self, frame, id_mapping, trajectories,
+                             particle_colors):  # Added id_mapping and other needed args
+        """Displays trajectories on the frame."""
+        overlay = np.zeros_like(frame)  # Initialize overlay here.
+
+        for particle_id, trajectory in trajectories.items():
+            color = particle_colors.get(
+                particle_id)  # Get color from the passed particle_colors. No need for colors list.
+            if color is not None:  # Ensure color is available
+                for k in range(1, len(trajectory)):
+                    pt1 = trajectory[k - 1]
+                    pt2 = trajectory[k]
+                    cv2.line(overlay, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])), color, 1)
+
+                # Draw current particle positions on the overlay. No need to loop again using id_mapping.
+                last_point = trajectory[-1]
+                cv2.circle(overlay, (int(last_point[0]), int(last_point[1])), 5, color,
+                           -1)  # Draw the particles on the overlay, not on the frame itself.
+                cv2.putText(overlay, f'ID: {particle_id}', (int(last_point[0]) + 10, int(last_point[1]) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Add trajectories to the original frame, then return:
+        output = cv2.addWeighted(frame, 1, overlay, 1,
+                                 0)  # Assuming 'frame' contains color information. Change accordingly if it's grayscale.
+        return output
 # def process_frame(self, save_data_enabled=False):
     #     """Process frame, update particle trajectories, and draw on mask."""
     #

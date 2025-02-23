@@ -533,6 +533,10 @@ class OpticalMetrologyModule:
                 if particle_id is None:  # Assign new ID if not found
                     particle_id = self.next_particle_id
                     self.next_particle_id += 1  # Increment next available ID
+                    if particle_id >= len(self.colors):  # Access colors as part of the class.
+                        self.colors.append(
+                            self.get_random_color())
+
 
                 size = self.calculate_size(gray, new, particle_id)  # Calculate size using new coordinates.
 
@@ -543,7 +547,7 @@ class OpticalMetrologyModule:
                     velocity_mm_per_s = velocity / self.scaling_factor
 
                     new_id_mapping[tuple(new.flatten())] = particle_id  # Update id mapping with NEW coordinates.
-                    updated_trajectories.setdefault(particle_id, []).append(
+                    self.trajectories.setdefault(particle_id, []).append(
                         (a, b))  # Update trajectories with NEW coordinates.
 
                     x_mm = a / self.scaling_factor
