@@ -61,6 +61,7 @@ feature_params = dict(maxCorners=5,  # adjust based on density of particles
 
 scatter1 = None  # Initialize scatter1 and scatter2
 scatter2 = None
+
 # Initialize variables (correct frame reading)
 ret, frame = cap.read()  # Read first frame here
 if not ret:
@@ -108,12 +109,6 @@ def track_and_display_particles(frame):
         p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
 
         if p1 is not None:
-            # good_new = p1[st == 1]  # Get only the good new points
-            # good_old = p0[st == 1]
-            # print(f"good new: {good_new}, good old: {good_old}")
-            # Handle if features are lost
-            # if not good_new.any() or not good_old.any():
-            #     print("All features lost. Re-initializing.")
 
             for new, old, status in zip(p1, p0, st):
                 if status:
@@ -217,7 +212,7 @@ def track_and_display_particles(frame):
     return img, results
 
 def animate(i):
-    global size_data, velocity_data, mask, frame_gray, old_gray, p0, id_mapping, trajectories, particle_colors, scatter1, scatter2  # Declare scatter as global
+    global particle_ids, size_data, velocity_data, mask, frame_gray, old_gray, p0, id_mapping, trajectories, particle_colors, scatter1, scatter2  # Declare scatter as global
 
     ret, frame = cap.read()
     if not ret:
@@ -225,16 +220,7 @@ def animate(i):
         ani.event_source.stop()
         return line1, line2  # Return something to prevent error
 
-    # output_frame, frame_gray, p0, particle_colors, id_mapping, _ = video_processor.track_particles(frame, trajectories, particle_colors, id_mapping)
-
     output_frame, results = track_and_display_particles(frame)
-    # old_gray = frame_gray.copy()  # Now old_gray will contain the latest grayscale frame.
-    # video_processor.old_gray = frame_gray.copy()  # Now the video_processor also has the correct old_gray value.
-    #
-    # output_frame = video_processor.display_trajectories(output_frame, id_mapping, video_processor.trajectories,
-    #                                                     particle_colors)
-    #
-    # results = metrology_module.perform_metrology_calculations(frame, id_mapping)  # Call updated function
 
     if results is None or not isinstance(results, list):
         print(f"Metrology calculations returned None or unexpected type. Skipping frame {i}")
@@ -252,25 +238,38 @@ def animate(i):
                 size_data.append(size)  # Store the particle size
                 velocity_data.append(velocity)  # Store the velocity
 
-    # Update or create scatter plots efficiently
-    if scatter1 is None:  # Initialize only if they don't exist.
-        scatter1, = ax1.plot(particle_ids, size_data, 'o', c='blue')
-        scatter2, = ax2.plot(particle_ids, velocity_data, 'x', c='red')
-    else:
-        scatter1.set_data(particle_ids, size_data)
-        scatter2.set_data(particle_ids, velocity_data)
+    # Keep only the last N data points to create a scrolling effect
+    scroll_window = 100  # Display the last 50 data points
+    if len(particle_ids) > scroll_window:
+        particle_ids = particle_ids[-scroll_window:]
+        size_data = size_data[-scroll_window:]
+        velocity_data = velocity_data[-scroll_window:]
 
-    # Dynamic x-axis limits for scrolling effect
-    if particle_ids:  # Check if any particles are being tracked
-        x_max = max(particle_ids)
-        x_min = 0  # Start at 0 or adjust if there are any lost particles
-        ax1.set_xlim(x_min, x_max)
-        ax2.set_xlim(x_min, x_max)
+    # Update the scatter plots
+    ax1.clear()
+    ax2.clear()
+
+    # Update or create scatter plots efficiently
+    # if scatter1 is None:  # Initialize only if they don't exist.
+    scatter1 = ax1.scatter(particle_ids, size_data, s=30, c='blue', alpha=0.7)
+    scatter2 = ax2.scatter(particle_ids, velocity_data, s=30, c='red', alpha=0.7)
+
+    # Dynamically update x-axis limits for scrolling
+    x_min = min(particle_ids, default=0) - 1
+    x_max = max(particle_ids, default=1) + 1
+    ax1.set_xlim(x_min, x_max)
+    ax2.set_xlim(x_min, x_max)
 
     if size_data:
-        ax1.set_ylim(min(size_data) - 0.5, max(size_data) + 0.5)  # Dynamic Y limits
+        y_min_size = min(size_data) - 0.5
+        y_max_size = max(size_data) + 0.5
+        ax1.set_ylim(y_min_size, y_max_size)
+
     if velocity_data:
-        ax2.set_ylim(min(velocity_data) - 0.5, max(velocity_data) + 0.5)  # Dynamic Y limits
+        y_min_velocity = min(velocity_data) - 0.5
+        y_max_velocity = max(velocity_data) + 0.5
+        ax2.set_ylim(y_min_velocity, y_max_velocity)
+
 
     cv2.imshow('Camera Feed', output_frame)
 
@@ -279,335 +278,8 @@ def animate(i):
 
     return scatter1, scatter2
 
-    # updated_trajectories = trajectories.copy()
-    #
-    # if p0 is not None:
-    #     for particle_id, points in updated_trajectories.items():  # Use updated_trajectories directly
-    #         if len(points) > 1:  # Draw the trajectories only if there are points.
-    #             for k in range(1, len(points)):
-    #                 pt1 = points[k - 1]
-    #                 pt2 = points[k]
-    #                 cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
-    #                          colors[particle_id % len(colors)], 1)
-    #
-    # return mask
-    #
-    # new_p0 = []
-    # new_id_mapping = id_mapping.copy()  # Create a copy of the dictionary
-    # updated_trajectories = trajectories.copy()
-    #
-    # # Handle existing particles
-    # if p0 is not None:
-    #     p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
-    #
-    #     if p1 is not None:
-    #         good_new = p1[st == 1]
-    #         good_old = p0[st == 1]
-    #
-    #         for new, old in zip(good_new, good_old):
-    #             a, b = new.ravel()
-    #             particle_id = id_mapping.get(tuple(old.ravel()))
-    #             print(f"Particle ID: {particle_id}, (a,b): ({a,b})")
-    #             if particle_id is not None:
-    #                 new_id_mapping[(a, b)] = particle_id
-    #                 new_p0.append(new)
-    #
-    #                 if particle_id in updated_trajectories:
-    #                     updated_trajectories[particle_id].append((a, b))
-    #                 else:
-    #                     updated_trajectories[particle_id] = [(a, b)]
-    #
-    #                 updated_trajectories[particle_id] = trajectories[particle_id][-trajectory_length:]
-    #
-    #                 for k in range(1, len(updated_trajectories[particle_id])):
-    #                     pt1 = updated_trajectories[particle_id][k - 1]
-    #                     pt2 = updated_trajectories[particle_id][k]
-    #                     cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
-    #                              colors[particle_id % len(colors)], 1)
-    #
-    #     p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
-    #
-    # # Detect new particles and assign unique IDs (only if needed based on your logic. Consider moving to a separate function if used less frequently)
-    # if frame_count % 10 == 0 or p0 is None:  # Example condition – adjust or remove as needed
-    #     kernel = np.ones((5, 5), np.uint8)
-    #     tophat = cv2.morphologyEx(frame_gray, cv2.MORPH_TOPHAT, kernel)
-    #     _, binary = cv2.threshold(tophat, 100, 255, cv2.THRESH_BINARY)
-    #
-    #     new_features = cv2.goodFeaturesToTrack(binary, mask=None, **feature_params)
-    #
-    #     if new_features is not None:
-    #         for new in new_features:
-    #             a, b = new.ravel()
-    #
-    #             if (a, b) not in id_mapping:
-    #                 particle_id = next_particle_id
-    #                 next_particle_id += 1
-    #                 print(f"Particle ID: {particle_id}, (a,b): ({a, b})")
-    #
-    #                 if particle_id >= len(colors):  # Extend colors if needed
-    #                     colors.append((random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)))
-    #
-    #                 updated_trajectories[particle_id] = [(a, b)]
-    #                 new_id_mapping[(a, b)] = particle_id
-    #
-    #                 if p0 is not None:
-    #                     p0 = np.vstack((p0, new.reshape(-1, 1, 2)))
-    #                 else:
-    #                     p0 = new.reshape(-1, 1, 2)
-    #     else:
-    #         p0 = None
-    #
-    # metrology_module.trajectories = updated_trajectories  # Update after each frame
-    #
-    # return frame_gray, p0, new_id_mapping, updated_trajectories, next_particle_id, mask
-
-    #     # # Generate random colors for trajectories
-    #     def get_random_color():
-    #         return (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-    #
-    #     colors = [get_random_color() for _ in range(100)]
-    #     # colors = np.random.randint(0, 255, (100, 3))
-    #
-    #     # Initialize variables
-    #     ret, old_frame = cap.read()
-    #     old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
-    #     p0 = cv2.goodFeaturesToTrack(old_gray, mask=None, **feature_params)
-    #     trajectories = {}  # Dictionary to store trajectories for each particle
-    #     id_mapping = {}  # Dictionary to map points to unique particle IDs
-    #     next_particle_id = 0  # Counter for unique particle IDs
-    #     frame_count = 0
-    #
-    #     while True:
-    #         ret, frame = cap.read()
-    #         if not ret:
-    #             break
-    #         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    #         mask = np.zeros_like(frame)
-    #
-    #         new_p0 = []
-    #         new_id_mapping = {}
-    #
-    #
-    #         if p0 is not None:
-    #             p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
-    #
-    #             if p1 is not None:
-    #                 for i, (new, old) in enumerate(zip(p1, p0)):
-    #                     a, b = new.ravel()
-    #                     c, d = old.ravel()
-    #                     particle_id = id_mapping.get(tuple(old.ravel()))  # Retrieve particle ID
-    #
-    #                     if particle_id is not None and st[i, 0] == 1:  # Check tracking status
-    #                         new_id_mapping[(a, b)] = particle_id  # Update ID mapping
-    #                         new_p0.append(new)  # Keep point for next frame
-    #
-    #                         if particle_id in trajectories:
-    #                             trajectories[particle_id].append((a, b))
-    #                         else:
-    #                             trajectories[particle_id] = [(a, b)]
-    #
-    #                         trajectories[particle_id] = trajectories[particle_id][-trajectory_length:]
-    #
-    #                         for k in range(1, len(trajectories[particle_id])):
-    #                             pt1 = trajectories[particle_id][k - 1]
-    #                             pt2 = trajectories[particle_id][k]
-    #                             cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
-    #                                      colors[particle_id % len(colors)], 1)
-    #
-    #             p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
-    #             id_mapping = new_id_mapping
-    #
-    #         # Detect new particles and assign unique IDs
-    #         if frame_count % 10 == 0 or p0 is None:
-    #             kernel = np.ones((5, 5), np.uint8)  # Define the structuring element (adjust size as needed)
-    #             tophat = cv2.morphologyEx(frame_gray, cv2.MORPH_TOPHAT, kernel)
-    #             _, binary = cv2.threshold(tophat, 100, 255, cv2.THRESH_BINARY)
-    #
-    #             new_features = cv2.goodFeaturesToTrack(binary, mask=None, **feature_params)
-    #
-    #             if new_features is not None:
-    #                 for new in new_features:
-    #                     a, b = new.ravel()
-    #
-    #                     if (a, b) not in id_mapping:  # Still check for duplicates
-    #                         particle_id = next_particle_id
-    #                         next_particle_id += 1
-    #
-    #                         if particle_id >= len(colors):
-    #                             colors.append(get_random_color())
-    #
-    #                         trajectories[particle_id] = [(a, b)]
-    #                         id_mapping[(a, b)] = particle_id
-    #
-    #                         if p0 is not None:
-    #                             p0 = np.vstack((p0, new.reshape(-1, 1, 2)))
-    #                         else:
-    #                             p0 = new.reshape(-1, 1, 2)
-    #
-    #         frame_count += 1
-    #         img = cv2.add(frame, mask)
-    #         cv2.imshow('frame', img)
-    #         k = cv2.waitKey(30) & 0xff
-    #         if k == 27:
-    #             break
-    #
-    #         # Update the previous frame
-    #         old_gray = frame_gray.copy()
-
-    # global old_gray, p0, id_mapping, trajectories, next_particle_id, frame_count, colors, lk_params, feature_params, scatter1, scatter2
-    #
-    # ret, frame = cap.read()
-    # if not ret:
-    #     print("End of video reached.")
-    #     ani.event_source.stop()
-    #     return line1, line2
-    #
-    # frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    # mask = np.zeros_like(frame)  # Mask for trajectories
-    #
-    # # Single Optical Flow Calculation
-    # if metrology_module.prev_gray is None:
-    #     metrology_module.prev_gray = frame_gray
-    #     metrology_module.initialize_features(frame.copy(), False)
-    #     return line1, line2  # Skip calculations on the very first frame
-    #
-    # p1, st, err = cv2.calcOpticalFlowPyrLK(
-    #     metrology_module.prev_gray, frame_gray, metrology_module.prev_features, None, **metrology_module.lk_params
-    # )
-    #
-    # if p1 is None:  # Handle case where no flow is calculated
-    #     print("Optical flow returned None.")
-    #     metrology_module.initialize_features(frame_gray.copy(), True)  # Re-initialize features
-    #     metrology_module.prev_gray = frame_gray.copy()
-    #     return line1, line2  # Return for blitting
-    #
-    # good_new = p1[st == 1]
-    # good_old = metrology_module.prev_features[st == 1]
-    #
-    # # Update id_mapping and trajectories based on optical flow results
-    # new_id_mapping = {}
-    # updated_trajectories = {}
-    # next_particle_id = 0 if i == 0 else next_particle_id  # Initialize only on first frame
-    #
-    # for new, old in zip(good_new, good_old):
-    #     a, b = new.ravel()
-    #     particle_id = id_mapping.get(tuple(old.flatten()))
-    #     if particle_id is not None:
-    #         new_id_mapping[tuple(new.flatten())] = particle_id  # Use new for id_mapping
-    #         updated_trajectories.setdefault(particle_id, []).append((a, b))
-    #     else:
-    #         particle_id = next_particle_id
-    #         next_particle_id += 1
-    #     # Now use particle_id (new or existing)
-    #     new_id_mapping[tuple(new.flatten())] = particle_id
-    #     updated_trajectories.setdefault(particle_id, []).append((a, b))
-    #
-    # id_mapping = new_id_mapping
-    # metrology_module.trajectories = updated_trajectories
-    # metrology_module.prev_features = good_new.reshape(-1, 1, 2)
-    # metrology_module.prev_gray = frame_gray.copy()
-    #
-    # # Draw trajectories
-    # for particle_id, trajectory in updated_trajectories.items():
-    #     metrology_module.trajectories[particle_id] = trajectory[-30:]  # Keep only last 30 points
-    #     for k in range(1, len(trajectory)):
-    #         pt1 = trajectory[k - 1]
-    #         pt2 = trajectory[k]
-    #         cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
-    #                  colors[particle_id % len(colors)], 2)
-    #
-    # p0 = good_new.reshape(-1, 1, 2)
-    #
-    # frame_count += 1
-    # metrology_module.frame_number = i
-    # results = metrology_module.perform_metrology_calculations(frame, metrology_module.trajectories,
-    #                                                           metrology_module.scaling_factor,
-    #                                                           id_mapping)
-    #
-    # if results is None:  # Check if results is None
-    #     print("Metrology calculations returned None. Skipping this frame.")
-    #     if scatter1 is not None and scatter2 is not None:  # check before returning
-    #         return scatter1, scatter2  # return even if not updated
-    #     return []
-    #
-    # particle_ids = []
-    # current_frame_sizes = []
-    # current_frame_velocities = []
-    #
-    # if isinstance(results, list):  # Check if result is a list and process accordingly.
-    #     for result in results:
-    #         if result:
-    #             particle_id = result.get('particle_id')  # extracting the particle_id from the result dictionary
-    #             size = result.get('size')
-    #             velocity = result.get('velocity')
-    #
-    #             if isinstance(size, (int, float, np.number)) and not np.isnan(size) and isinstance(velocity, (
-    #                     int, float, np.number)) and not np.isnan(velocity):
-    #                 current_frame_sizes.append(size)
-    #                 current_frame_velocities.append(velocity)
-    #                 particle_ids.append(particle_id)
-    # else:
-    #     print(f"Frame {i}: Unexpected results type: {type(results)}")
-    #     return line1, line2
-    #
-    # if not particle_ids: # Check for empty results
-    #     print(f"Frame {i}: No valid particle IDs found for plotting.")
-    #     return []  # return empty list to skip plotting in this frame
-    #
-    # # Update scatter plot data (more efficient)
-    # if scatter1 is None:
-    #     scatter1, = ax1.plot(particle_ids, current_frame_sizes, 'o', c='blue')
-    #     scatter2, = ax2.plot(particle_ids, current_frame_velocities, 'x', c='red')
-    # else:
-    #     scatter1.set_data(particle_ids, current_frame_sizes)
-    #     scatter2.set_data(particle_ids, current_frame_velocities)
-    #
-    # ax1.set_xlabel("Particle ID")
-    # ax1.set_xlim(-1, len(results))
-    #
-    # if current_frame_sizes:
-    #     ymin = min(current_frame_sizes)
-    #     ymax = max(current_frame_sizes)
-    #     if ymin == ymax:  # Check if min and max are equal
-    #         ymin -= 0.5  # Expand the range slightly
-    #         ymax += 0.5
-    #     ax1.set_ylim(ymin, ymax)
-    #
-    # ax2.set_xlabel("Particle ID")
-    # ax2.set_xlim(-1, len(results))  # Adjust x-axis limits for particle IDs
-    # if current_frame_velocities:
-    #     ymin = min(current_frame_velocities)
-    #     ymax = max(current_frame_velocities)
-    #     if ymin == ymax:  # Check if min and max are equal
-    #         ymin -= 0.5  # Expand the range slightly
-    #         ymax += 0.5
-    #     ax2.set_ylim(ymin, ymax)
-    #
-    # # frame = metrology_module.annotate_frame(frame)
-    # cv2.imshow('Camera Feed', frame)
-    #
-    # if cv2.waitKey(1) & 0xFF == ord('q'):
-    #     ani.event_source.stop()
-    #
-    # return scatter1, scatter2
-
-
-ani = animation.FuncAnimation(fig, animate, frames=min(total_frames, max_frames), init_func=init, blit=True, interval=30, cache_frame_data=False)
+ani = animation.FuncAnimation(fig, animate, frames=min(total_frames, max_frames), init_func=init, blit=False, interval=30, cache_frame_data=False)
 plt.show()
 
 cap.release()
 cv2.destroyAllWindows()
-
-# old_gray, p0, id_mapping, trajectories, next_particle_id, mask = display_trajectories(
-#     frame, mask, frame_gray, old_gray, p0, id_mapping, trajectories,
-#     next_particle_id, colors, lk_params, feature_params,
-#     trajectory_length=30, metrology_module=metrology_module  # Pass metrology_module
-# )
-# frame_count += 1
-#
-# metrology_module.frame_number = i
-#
-# print(f"Frame {i}: Number of Trajectories = {len(trajectories)}")
-#
-# # Correct call to perform_metrology_calculations
-# results = metrology_module.perform_metrology_calculations(frame, trajectories, metrology_module.scaling_factor, id_mapping)
