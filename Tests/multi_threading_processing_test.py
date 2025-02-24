@@ -97,21 +97,6 @@ def display_results(display_queue, particle_data, frame_width, frame_height, tra
                         if not (0 <= last_x < frame_width and 0 <= last_y < frame_height):
                             del particle_data[pid]
 
-                        # for k in range(1, len(trajectory)):
-                        #     pt1 = trajectory[k - 1]
-                        #     pt2 = trajectory[k]
-                        #     cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])), (0, 255, 0), 1)
-                        #
-                        # last_x, last_y = trajectory[-1]  # Get last known position
-                        #
-                        # # Check if the particle has exited the screen
-                        # if last_x < 0 or last_x > frame_width or last_y < 0 or last_y > frame_height:
-                        #     particles_to_remove.append(pid)
-                        #     continue
-                # Remove trajectories for particles that have exited the screen
-                # for pid in particles_to_remove:
-                #     del particle_data[pid]
-
             # Overlay mask on the frame to visualize trajectories
             # output_frame = cv2.add(frame, mask)
             cv2.imshow('Video with Real-Time Trajectories', overlay)
@@ -246,26 +231,28 @@ def track_particles(frame, particle_data, dict_lock):
                         with dict_lock:
                             # Handle trajectories
                             if particle_id in particle_data:
-                                trajectory = list(particle_data[particle_id]["trajectory"])
-                                trajectory.append((a, b))
-                                particle_data[particle_id]["trajectory"] = trajectory  # Update trajectory back
+
+                                size = metrology_module.calculate_size(frame, (a, b),
+                                                                       particle_id)  # Calculate size using new coordinates.
+                                velocity = metrology_module.calculate_velocity(a, b, c, d)  # Calculate velocity
+                                trajectory_mm = []
+
+                                size_um = (size / 23.269069947552367) * 1000 if size is not None else None
+                                velocity_mm_per_s = velocity / 23.269069947552367 if velocity is not None else None
+
+                                trajectory = list(particle_data[particle_id]["trajectory"]) # Copy the list
+                                trajectory.append((a, b)) # Append new point
+                                particle_data[particle_id] = {
+                                    "size": size_um,
+                                    "velocity": velocity_mm_per_s,
+                                    "trajectory": trajectory
+                                }  # Update trajectory back
 
                             else:
                                 particle_data[particle_id] = {"size": None, "velocity": None, "trajectory": [(a, b)]}
                                 print(f"New Particle ID: {particle_id}, Trajectory: {(a, b)}")
 
                         # trajectories[particle_id] = trajectories[particle_id][-trajectory_length:]
-
-                        size = metrology_module.calculate_size(frame, (a,b), particle_id)  # Calculate size using new coordinates.
-                        velocity = metrology_module.calculate_velocity(a, b, c, d)  # Calculate velocity
-                        trajectory_mm = []
-
-                        size_um = (size / 23.269069947552367) * 1000 if size is not None else None
-                        velocity_mm_per_s = velocity / 23.269069947552367 if velocity is not None else None
-
-                        with dict_lock:
-                            particle_data[particle_id]["size"] = size_um
-                            particle_data[particle_id]["velocity"] = velocity_mm_per_s
 
                         print(f"Particle ID: {particle_id}, Size: {size_um}, Velocity: {velocity_mm_per_s} mm/s")
                         new_id_mapping[tuple(new.flatten())] = particle_id  # Update id mapping with NEW coordinates.
@@ -283,11 +270,6 @@ def track_particles(frame, particle_data, dict_lock):
                             "velocity": velocity_mm_per_s,
                             "trajectory": trajectory_mm
                         })
-                    # else:
-                    #     # Remove lost particles
-                    #     lost_id = id_mapping.pop(tuple(old.ravel()), None)
-                    #     if lost_id is not None:
-                    #         parti.pop(lost_id, None)
 
         p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
         id_mapping = new_id_mapping
@@ -327,7 +309,7 @@ def track_particles(frame, particle_data, dict_lock):
 
     return results
 
-def process_frame_worker(frame_queue, data_queue):
+def process_frame_worker(frame_queue, data_queue, particle_data, dict_lock):
     """Process frames from the frame queue and log particle size and velocity data."""
     frame_number = 0
     while True:
@@ -384,39 +366,17 @@ if __name__ == "__main__":
     # Start capture thread
     capture_thread = threading.Thread(target=capture_frames, args=(cap, frame_queue, display_queue), daemon=True)
     capture_thread.start()
-    #
-    # threading.Thread(target=display_results, args=(display_queue, frame_width, frame_height)).start()
-    # threading.Thread(target=update_graph, args=(data_queue,)).start()
-    # threading.Thread(target=write_csv).start()
-
-
-
-    # # Worker processes for frame processing
-    # worker_process = mp.Process(target=process_frame_worker, args=(frame_queue, data_queue))
-    # worker_process.daemon = True
-    # worker_process.start()
-
-    # Start PyQtGraph plot updates
-    # update_graph(data_queue)
 
     num_processes = mp.cpu_count() - 1
-    # process_pool = []
-    #
-    # for _ in range(num_processes):
-    #     p = mp.Process(target=process_frame_worker, args=(frame_queue, data_queue))
-    #     p.start()
-    #     process_pool.append(p)
 
     process_pool = [
-        mp.Process(target=process_frame_worker, args=(frame_queue, data_queue), daemon=True)
+        mp.Process(target=process_frame_worker, args=(frame_queue, data_queue, particle_data, dict_lock), daemon=True)
         for _ in range(num_processes)
     ]
 
     # Wait for processes to complete
     for p in process_pool:
         p.start()
-        # p.join()
-        # Start PyQtGraph to update real-time plots from `data_queue`
 
     display_thread = threading.Thread(target=display_results,
                                       args=(display_queue, particle_data, frame_width, frame_height), daemon=True)
@@ -441,8 +401,3 @@ if __name__ == "__main__":
         # Ensure all resources are released
         cap.release()
         cv2.destroyAllWindows()
-
-    #
-    # capture_thread.join()
-    # cap.release()
-    # cv2.destroyAllWindows()
