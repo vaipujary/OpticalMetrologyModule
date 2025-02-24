@@ -24,7 +24,6 @@ def display_trajectories(video_path, trajectory_length=30):
         return (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
 
     colors = [get_random_color() for _ in range(100)]
-    # colors = np.random.randint(0, 255, (100, 3))
 
     # Initialize variables
     ret, old_frame = cap.read()
@@ -69,8 +68,8 @@ def display_trajectories(video_path, trajectory_length=30):
                             pt1 = trajectories[particle_id][k - 1]
                             pt2 = trajectories[particle_id][k]
                             cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
-                                     colors[particle_id % len(colors)], 1)
-
+                                     (0, 255, 0), 1)
+#colors[particle_id % len(colors)]
             p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
             id_mapping = new_id_mapping
 
@@ -121,115 +120,5 @@ display_trajectories(video_path, trajectory_length=30)
 
 #Contours?
 
-#
-# contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-#
-# filtered_contours = []
-# for contour in contours:
-#     x, y, w, h = cv2.boundingRect(contour)
-#     aspect_ratio = float(w) / h
-#     if 0.67 <= aspect_ratio <= 1.5:  # Example: filter for aspect ratios close to 1 (adjust as needed)
-#         filtered_contours.append(contour)
-# mask = np.zeros_like(frame_gray)
-# cv2.drawContours(mask, filtered_contours, -1, (255, 255, 255), -1)
-#
-# mask = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
 
-# def display_trajectories(video_path, trajectory_length=20):
-#     cap = cv2.VideoCapture(video_path)
-#     ret, frame = cap.read()
-#     if not ret:
-#         print("Error opening video file.")
-#         return
-#
-#     # Initialize variables for tracking
-#     lk_params = dict(winSize=(15, 15),
-#                      maxLevel=2,
-#                      criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
-#
-#     # Create some random colors for the trajectories
-#     colors = np.random.randint(0, 255, (100, 3))
-#
-#     # Take first frame and find corners in it
-#     old_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-#     p0 = cv2.goodFeaturesToTrack(old_gray, mask=None, maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
-#
-#     # Store trajectories for each point
-#     trajectories = {}
-#     next_trajectory_index = 0  # Keep track of next available index
-#
-#     while True:
-#         ret, frame = cap.read()
-#         if not ret:
-#             break
-#
-#         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-#
-#         # Calculate optical flow
-#         p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
-#
-#         # Create a new mask for each frame
-#         mask = np.zeros_like(frame)
-#
-#         # Before filtering, store the indices of good points
-#         good_indices = np.where(st == 1)[0]
-#
-#         # Select good points and remove points that have moved off-screen
-#         if p1 is not None:
-#             good_new = p1[st == 1]
-#             good_old = p0[st == 1]
-#
-#             # Filter out points that are outside the frame boundaries
-#             h, w = frame.shape[:2]
-#             inside_frame = lambda pt: 0 <= pt[0] < w and 0 <= pt[1] < h
-#             inside_indices = [i for i, new in enumerate(good_new.reshape(-1, 2)) if inside_frame(new)]
-#
-#             good_new = good_new[inside_indices]
-#             good_old = good_old[inside_indices]
-#
-#             for i, (new, old) in enumerate(zip(good_new, good_old)):
-#                 a, b = new.ravel()
-#                 c, d = old.ravel()
-#
-#                 # Get the original trajectory index from before filtering
-#                 original_index = good_indices[inside_indices[i]]
-#
-#                 if original_index not in trajectories:
-#                     trajectories[original_index] = []
-#                 trajectories[original_index].append((int(a), int(b)))
-#                 if len(trajectories[original_index]) > trajectory_length:
-#                     trajectories[original_index].pop(0)
-#
-#                 for k in range(1, len(trajectories[original_index])):
-#                     mask = cv2.line(mask, trajectories[original_index][k - 1], trajectories[original_index][k],
-#                                     colors[original_index % len(colors)].tolist(), 2)
-#                 frame = cv2.circle(frame, (int(a), int(b)), 5, colors[original_index % len(colors)].tolist(), -1)
-#
-#
-#         img = cv2.add(frame, mask)
-#
-#         cv2.imshow('frame', img)
-#         k = cv2.waitKey(30) & 0xff
-#         if k == 27:
-#             break
-#
-#         # Now update the previous frame and previous points
-#         old_gray = frame_gray.copy()
-#         p0 = good_new.reshape(-1, 1, 2)
-#         if p0 is None or p0.size == 0:
-#             p0 = cv2.goodFeaturesToTrack(old_gray, mask=None, maxCorners=100, qualityLevel=0.3, minDistance=7,
-#                                          blockSize=7)
-#             if p0 is None:
-#                 print("Error tracking good features.")
-#                 break
-#
-#             trajectories = {}  # Clear trajectories when new features are tracked
-#
-#     cv2.destroyAllWindows()
-#     cap.release()
-#
-#
-# # Example usage
-# video_path = "../Test Data/Videos/MicrosphereVideo3.avi"
-# display_trajectories(video_path, trajectory_length=50)
 
