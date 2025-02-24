@@ -38,6 +38,7 @@ next_particle_id = 0  # Counter for unique particle IDs
 frame_count = 0
 mask = None
 # particle_data = {}
+trajectories = {}
 
 # Lock for thread safety within each process
 dict_lock = threading.Lock()
@@ -56,51 +57,83 @@ def capture_frames(cap, frame_queue, display_queue):
         display_queue.put(frame.copy())
 
 # Thread to display video trajectories
-def display_results(display_queue, particle_data, frame_width, frame_height, trajectory_length=30):
+def display_results(display_queue, trajectory_length=30):
     """Display original frames with trajectory overlays."""
     # Use a persistent mask for smooth trajectory display
-    global mask
+    global mask, p0, old_gray, id_mapping, frame_count, next_particle_id, trajectories
 
     mask = None
 
     while True:
         if not display_queue.empty():
             frame = display_queue.get()
+            frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
             # Initialize mask or resize if needed
-            if mask is None or mask.shape[:2] != frame.shape[:2]:
-                mask = np.zeros_like(frame)
+            mask = np.zeros_like(frame)
 
-            overlay = frame.copy()  # Create a copy for overlaying to ensure original frame is not modified
+            new_p0 = []
+            new_id_mapping = {}
 
-            with dict_lock:
-                particles_to_remove = []
-                print(f"Particle data: {particle_data}")
-                for pid, data in list(particle_data.items()):
-                    trajectory = data.get('trajectory', [])[-trajectory_length:] # Get recent trajectory points
-                    print(f"Particle ID: {pid}, Trajectory: {trajectory}")
-                    if len(trajectory) > 1:
-                        print("trajectory greater than 1")
-                        # Draw trajectory lines on the overlay
-                        for k in range(1, len(trajectory)):
-                            pt1 = tuple(
-                                map(int, trajectory[k - 1]))  # Convert coordinates to integers to avoid TypeError
-                            pt2 = tuple(map(int, trajectory[k]))  # Convert coordinates to integers to avoid TypeError
+            if p0 is not None:
+                p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
 
-                            # Check if points are within frame bounds
-                            if (0 <= pt1[0] < frame_width and 0 <= pt1[1] < frame_height and
-                                    0 <= pt2[0] < frame_width and 0 <= pt2[1] < frame_height):
-                                cv2.line(overlay, pt1, pt2, (0, 255, 0), 2)  # Thicker line for better visibility
+                if p1 is not None:
+                    for i, (new, old) in enumerate(zip(p1, p0)):
+                        a, b = new.ravel()
+                        c, d = old.ravel()
+                        particle_id = id_mapping.get(tuple(old.ravel()))  # Retrieve particle ID
 
-                        # Remove particles that have exited the screen
-                        last_x, last_y = trajectory[-1]
-                        if not (0 <= last_x < frame_width and 0 <= last_y < frame_height):
-                            del particle_data[pid]
+                        if particle_id is not None and st[i, 0] == 1:  # Check tracking status
+                            new_id_mapping[(a, b)] = particle_id  # Update ID mapping
+                            new_p0.append(new)  # Keep point for next frame
 
-            # Overlay mask on the frame to visualize trajectories
-            # output_frame = cv2.add(frame, mask)
-            cv2.imshow('Video with Real-Time Trajectories', overlay)
+                            if particle_id in trajectories:
+                                trajectories[particle_id].append((a, b))
+                            else:
+                                trajectories[particle_id] = [(a, b)]
 
+                            trajectories[particle_id] = trajectories[particle_id][-trajectory_length:]
+
+                            for k in range(1, len(trajectories[particle_id])):
+                                pt1 = trajectories[particle_id][k - 1]
+                                pt2 = trajectories[particle_id][k]
+                                cv2.line(mask, (int(pt1[0]), int(pt1[1])), (int(pt2[0]), int(pt2[1])),
+                                         (0, 255, 0), 1)
+                p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
+                id_mapping = new_id_mapping
+
+            # Detect new particles and assign unique IDs
+            if frame_count % 10 == 0 or p0 is None:
+                kernel = np.ones((5, 5), np.uint8)  # Define the structuring element (adjust size as needed)
+                tophat = cv2.morphologyEx(frame_gray, cv2.MORPH_TOPHAT, kernel)
+                _, binary = cv2.threshold(tophat, 100, 255, cv2.THRESH_BINARY)
+
+                new_features = cv2.goodFeaturesToTrack(binary, mask=None, **feature_params)
+
+                if new_features is not None:
+                    for new in new_features:
+                        a, b = new.ravel()
+
+                        if (a, b) not in id_mapping:  # Still check for duplicates
+                            particle_id = next_particle_id
+                            next_particle_id += 1
+
+                            trajectories[particle_id] = [(a, b)]
+                            id_mapping[(a, b)] = particle_id
+
+                            if p0 is not None:
+                                p0 = np.vstack((p0, new.reshape(-1, 1, 2)))
+                            else:
+                                p0 = new.reshape(-1, 1, 2)
+
+            frame_count += 1
+            img = cv2.add(frame, mask)
+
+            cv2.imshow('Video with Real-Time Trajectories', img)
+
+            # Update the previous frame
+            old_gray = frame_gray.copy()
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
     cv2.destroyAllWindows()
@@ -202,7 +235,7 @@ def write_csv():
                     if size is not None and velocity is not None and trajectory_str is not None:
                         csvwriter.writerow([frame_number, timestamp, particle_id, size, velocity, trajectory_str])
 
-def track_particles(frame, particle_data, dict_lock):
+def track_particles(frame, particle_data):
     global old_gray, p0, id_mapping, frame_count, next_particle_id
 
     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -228,31 +261,25 @@ def track_particles(frame, particle_data, dict_lock):
                         new_id_mapping[(a, b)] = particle_id  # Update ID mapping
                         new_p0.append(new)  # Keep point for next frame
 
-                        with dict_lock:
-                            # Handle trajectories
-                            if particle_id in particle_data:
+                        # Handle trajectories
+                        if particle_id in particle_data:
+                            trajectory = list(particle_data[particle_id]["trajectory"])
+                            trajectory.append((a, b))
+                            particle_data[particle_id]["trajectory"] = trajectory  # Update trajectory back
+                            print(f"Updated trajectory for Particle ID: {particle_id}, Trajectory: {trajectory}")
 
-                                size = metrology_module.calculate_size(frame, (a, b),
-                                                                       particle_id)  # Calculate size using new coordinates.
-                                velocity = metrology_module.calculate_velocity(a, b, c, d)  # Calculate velocity
-                                trajectory_mm = []
-
-                                size_um = (size / 23.269069947552367) * 1000 if size is not None else None
-                                velocity_mm_per_s = velocity / 23.269069947552367 if velocity is not None else None
-
-                                trajectory = list(particle_data[particle_id]["trajectory"]) # Copy the list
-                                trajectory.append((a, b)) # Append new point
-                                particle_data[particle_id] = {
-                                    "size": size_um,
-                                    "velocity": velocity_mm_per_s,
-                                    "trajectory": trajectory
-                                }  # Update trajectory back
-
-                            else:
-                                particle_data[particle_id] = {"size": None, "velocity": None, "trajectory": [(a, b)]}
-                                print(f"New Particle ID: {particle_id}, Trajectory: {(a, b)}")
+                        else:
+                            particle_data[particle_id] = {"size": None, "velocity": None, "trajectory": [(a, b)]}
+                            print(f"New Particle ID: {particle_id}, Trajectory: {(a, b)}")
 
                         # trajectories[particle_id] = trajectories[particle_id][-trajectory_length:]
+
+                        size = metrology_module.calculate_size(frame, (a,b), particle_id)  # Calculate size using new coordinates.
+                        velocity = metrology_module.calculate_velocity(a, b, c, d)  # Calculate velocity
+                        trajectory_mm = []
+
+                        size_um = (size / 23.269069947552367) * 1000 if size is not None else None
+                        velocity_mm_per_s = velocity / 23.269069947552367 if velocity is not None else None
 
                         print(f"Particle ID: {particle_id}, Size: {size_um}, Velocity: {velocity_mm_per_s} mm/s")
                         new_id_mapping[tuple(new.flatten())] = particle_id  # Update id mapping with NEW coordinates.
@@ -270,6 +297,11 @@ def track_particles(frame, particle_data, dict_lock):
                             "velocity": velocity_mm_per_s,
                             "trajectory": trajectory_mm
                         })
+                    # else:
+                    #     # Remove lost particles
+                    #     lost_id = id_mapping.pop(tuple(old.ravel()), None)
+                    #     if lost_id is not None:
+                    #         parti.pop(lost_id, None)
 
         p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
         id_mapping = new_id_mapping
@@ -309,13 +341,13 @@ def track_particles(frame, particle_data, dict_lock):
 
     return results
 
-def process_frame_worker(frame_queue, data_queue, particle_data, dict_lock):
+def process_frame_worker(frame_queue, data_queue, particle_data):
     """Process frames from the frame queue and log particle size and velocity data."""
     frame_number = 0
     while True:
         if not frame_queue.empty():
             frame = frame_queue.get()
-            results = track_particles(frame, particle_data, dict_lock)
+            results = track_particles(frame, particle_data)
             if not results:  # Log empty results for debugging
                 print(f"No particles detected in frame {frame_number}")
 
@@ -331,18 +363,16 @@ def process_frame_worker(frame_queue, data_queue, particle_data, dict_lock):
                         # Update shared particle data
                         print(f"Updating particle_data for Particle ID: {particle_id}")  # Debug print
 
-                        if size is not None:
-                            # Update shared particle data
-                            particle_data[particle_id] = {
-                                "size": size,
-                                "velocity": velocity,
-                                "trajectory": trajectory
-                            }
+                        # Update shared particle data
+                        particle_data[particle_id] = {
+                            "size": size,
+                            "velocity": velocity,
+                            "trajectory": trajectory
+                        }
 
-                            print(f"Particle data dictionary: {particle_data}")
-
-                            # Store data in queue for CSV logging
-                            data_queue.put((frame_number, particle_id, size, velocity, trajectory))
+                        # Store data in queue for CSV logging
+                        print("Storing data in queue")
+                        data_queue.put((frame_number, particle_id, size, velocity, trajectory))
 
             frame_number += 1
 
@@ -370,16 +400,17 @@ if __name__ == "__main__":
     num_processes = mp.cpu_count() - 1
 
     process_pool = [
-        mp.Process(target=process_frame_worker, args=(frame_queue, data_queue, particle_data, dict_lock), daemon=True)
+        mp.Process(target=process_frame_worker, args=(frame_queue, data_queue, particle_data), daemon=True)
         for _ in range(num_processes)
     ]
 
     # Wait for processes to complete
     for p in process_pool:
         p.start()
+        # p.join()
+        # Start PyQtGraph to update real-time plots from `data_queue`
 
-    display_thread = threading.Thread(target=display_results,
-                                      args=(display_queue, particle_data, frame_width, frame_height), daemon=True)
+    display_thread = threading.Thread(target=display_results, args=(display_queue,), daemon=True)
     display_thread.start()
     graph_thread = threading.Thread(target=update_graph, args=(data_queue,), daemon=True)
     graph_thread.start()
@@ -401,3 +432,8 @@ if __name__ == "__main__":
         # Ensure all resources are released
         cap.release()
         cv2.destroyAllWindows()
+
+    #
+    # capture_thread.join()
+    # cap.release()
+    # cv2.destroyAllWindows()

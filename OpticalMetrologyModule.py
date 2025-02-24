@@ -492,88 +492,88 @@ class OpticalMetrologyModule:
 
         return velocity
 
-    def perform_metrology_calculations(self, frame):
-        """Performs metrology calculations: feature detection, tracking, and measurements."""
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(
-            frame.shape) > 2 else frame  # Simplified grayscale conversion.
-
-        if self.prev_gray is None:
-            self.prev_gray = gray
-            self.initialize_features(frame.copy(), False)  # Initialize ONLY when self.prev_gray is None
-            return []  # return empty list initially
-
-        p1, st, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, self.prev_features, None, **self.lk_params)
-
-        results = []  # Initialize results
-
-        if p1 is not None:
-            good_new = p1[st == 1]
-            good_old = self.prev_features[st == 1]
-
-            # Handle if features are lost
-            if not good_new.any() or not good_old.any():
-                print("All features lost. Re-initializing.")
-                self.prev_gray = None  # Clear previous frame to trigger re-initialization on next call.
-                self.prev_features = None  # Clear features.
-                self.initialize_features(frame, True)  # Re-initialize
-                return []  # return empty list after re-initialization.
-
-            new_id_mapping = {}  # Initialize id_mapping locally, within the function.
-            updated_trajectories = {}  # Initialize trajectories.
-
-            for new, old in zip(good_new, good_old):
-                a, b = new.ravel()
-                c, d = old.ravel()
-
-                old_tuple = tuple(old.flatten())
-
-                particle_id = self.id_mapping.get(old_tuple)  # Get particle_id for old coordinates
-
-                if particle_id is None:  # Assign new ID if not found
-                    particle_id = self.next_particle_id
-                    self.next_particle_id += 1  # Increment next available ID
-                    if particle_id >= len(self.colors):  # Access colors as part of the class.
-                        self.colors.append(
-                            self.get_random_color())
-
-
-                size = self.calculate_size(gray, new, particle_id)  # Calculate size using new coordinates.
-
-                if size is not None:
-                    self.microsphere_sizes[particle_id] = size
-                    size_um = (size / self.scaling_factor) * 1000
-                    velocity = self.calculate_velocity(a, b, c, d)  # Calculate velocity
-                    velocity_mm_per_s = velocity / self.scaling_factor
-
-                    new_id_mapping[tuple(new.flatten())] = particle_id  # Update id mapping with NEW coordinates.
-                    self.trajectories.setdefault(particle_id, []).append(
-                        (a, b))  # Update trajectories with NEW coordinates.
-
-                    x_mm = a / self.scaling_factor
-                    y_mm = b / self.scaling_factor
-                    trajectory_mm = []
-                    if particle_id in updated_trajectories:  # Use updated_trajectories
-                        for x, y in updated_trajectories[particle_id]:
-                            trajectory_mm.append((x / self.scaling_factor, y / self.scaling_factor))
-                    results.append({  # Append the result directly
-                        "frame_number": self.frame_number,
-                        "particle_id": particle_id,
-                        "x": x_mm,
-                        "y": y_mm,
-                        "size": size_um,
-                        "velocity": velocity_mm_per_s,
-                        "trajectory": trajectory_mm
-                    })
-
-            self.trajectories = updated_trajectories  # Update the module-level trajectories.
-            self.id_mapping = new_id_mapping
-
-            self.prev_features = good_new.reshape(-1, 1, 2)
-            self.frame_number += 1
-
-        self.prev_gray = gray.copy()
-        return results
+    # def perform_metrology_calculations(self, frame):
+    #     """Performs metrology calculations: feature detection, tracking, and measurements."""
+    #
+    #     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if len(
+    #         frame.shape) > 2 else frame  # Simplified grayscale conversion.
+    #
+    #     if self.prev_gray is None:
+    #         self.prev_gray = gray
+    #         self.initialize_features(frame.copy(), False)  # Initialize ONLY when self.prev_gray is None
+    #         return []  # return empty list initially
+    #
+    #     p1, st, err = cv2.calcOpticalFlowPyrLK(self.prev_gray, gray, self.prev_features, None, **self.lk_params)
+    #
+    #     results = []  # Initialize results
+    #
+    #     if p1 is not None:
+    #         good_new = p1[st == 1]
+    #         good_old = self.prev_features[st == 1]
+    #
+    #         # Handle if features are lost
+    #         if not good_new.any() or not good_old.any():
+    #             print("All features lost. Re-initializing.")
+    #             self.prev_gray = None  # Clear previous frame to trigger re-initialization on next call.
+    #             self.prev_features = None  # Clear features.
+    #             self.initialize_features(frame, True)  # Re-initialize
+    #             return []  # return empty list after re-initialization.
+    #
+    #         new_id_mapping = {}  # Initialize id_mapping locally, within the function.
+    #         updated_trajectories = {}  # Initialize trajectories.
+    #
+    #         for new, old in zip(good_new, good_old):
+    #             a, b = new.ravel()
+    #             c, d = old.ravel()
+    #
+    #             old_tuple = tuple(old.flatten())
+    #
+    #             particle_id = self.id_mapping.get(old_tuple)  # Get particle_id for old coordinates
+    #
+    #             if particle_id is None:  # Assign new ID if not found
+    #                 particle_id = self.next_particle_id
+    #                 self.next_particle_id += 1  # Increment next available ID
+    #                 if particle_id >= len(self.colors):  # Access colors as part of the class.
+    #                     self.colors.append(
+    #                         self.get_random_color())
+    #
+    #
+    #             size = self.calculate_size(gray, new, particle_id)  # Calculate size using new coordinates.
+    #
+    #             if size is not None:
+    #                 self.microsphere_sizes[particle_id] = size
+    #                 size_um = (size / self.scaling_factor) * 1000
+    #                 velocity = self.calculate_velocity(a, b, c, d)  # Calculate velocity
+    #                 velocity_mm_per_s = velocity / self.scaling_factor
+    #
+    #                 new_id_mapping[tuple(new.flatten())] = particle_id  # Update id mapping with NEW coordinates.
+    #                 self.trajectories.setdefault(particle_id, []).append(
+    #                     (a, b))  # Update trajectories with NEW coordinates.
+    #
+    #                 x_mm = a / self.scaling_factor
+    #                 y_mm = b / self.scaling_factor
+    #                 trajectory_mm = []
+    #                 if particle_id in updated_trajectories:  # Use updated_trajectories
+    #                     for x, y in updated_trajectories[particle_id]:
+    #                         trajectory_mm.append((x / self.scaling_factor, y / self.scaling_factor))
+    #                 results.append({  # Append the result directly
+    #                     "frame_number": self.frame_number,
+    #                     "particle_id": particle_id,
+    #                     "x": x_mm,
+    #                     "y": y_mm,
+    #                     "size": size_um,
+    #                     "velocity": velocity_mm_per_s,
+    #                     "trajectory": trajectory_mm
+    #                 })
+    #
+    #         self.trajectories = updated_trajectories  # Update the module-level trajectories.
+    #         self.id_mapping = new_id_mapping
+    #
+    #         self.prev_features = good_new.reshape(-1, 1, 2)
+    #         self.frame_number += 1
+    #
+    #     self.prev_gray = gray.copy()
+    #     return results
 
     # def perform_metrology_calculations(self, frame, trajectories, scaling_factor, id_mapping):
     #     """Performs metrology calculations on a single frame, suitable for multiprocessing."""
