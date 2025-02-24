@@ -56,7 +56,7 @@ def capture_frames(cap, frame_queue, display_queue):
         display_queue.put(frame.copy())
 
 # Thread to display video trajectories
-def display_results(display_queue, frame_width, frame_height, particle_data, trajectory_length=30):
+def display_results(display_queue, particle_data, frame_width, frame_height, trajectory_length=30):
     """Display original frames with trajectory overlays."""
     # Use a persistent mask for smooth trajectory display
     global mask
@@ -217,7 +217,7 @@ def write_csv():
                     if size is not None and velocity is not None and trajectory_str is not None:
                         csvwriter.writerow([frame_number, timestamp, particle_id, size, velocity, trajectory_str])
 
-def track_particles(frame, particle_data):
+def track_particles(frame, particle_data, dict_lock):
     global old_gray, p0, id_mapping, frame_count, next_particle_id
 
     frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -243,16 +243,16 @@ def track_particles(frame, particle_data):
                         new_id_mapping[(a, b)] = particle_id  # Update ID mapping
                         new_p0.append(new)  # Keep point for next frame
 
-                        # Handle trajectories
-                        if particle_id in particle_data:
-                            trajectory = list(particle_data[particle_id]["trajectory"])
-                            trajectory.append((a, b))
-                            particle_data[particle_id]["trajectory"] = trajectory  # Update trajectory back
-                            print(f"Updated trajectory for Particle ID: {particle_id}, Trajectory: {trajectory}")
+                        with dict_lock:
+                            # Handle trajectories
+                            if particle_id in particle_data:
+                                trajectory = list(particle_data[particle_id]["trajectory"])
+                                trajectory.append((a, b))
+                                particle_data[particle_id]["trajectory"] = trajectory  # Update trajectory back
 
-                        else:
-                            particle_data[particle_id] = {"size": None, "velocity": None, "trajectory": [(a, b)]}
-                            print(f"New Particle ID: {particle_id}, Trajectory: {(a, b)}")
+                            else:
+                                particle_data[particle_id] = {"size": None, "velocity": None, "trajectory": [(a, b)]}
+                                print(f"New Particle ID: {particle_id}, Trajectory: {(a, b)}")
 
                         # trajectories[particle_id] = trajectories[particle_id][-trajectory_length:]
 
@@ -262,6 +262,10 @@ def track_particles(frame, particle_data):
 
                         size_um = (size / 23.269069947552367) * 1000 if size is not None else None
                         velocity_mm_per_s = velocity / 23.269069947552367 if velocity is not None else None
+
+                        with dict_lock:
+                            particle_data[particle_id]["size"] = size_um
+                            particle_data[particle_id]["velocity"] = velocity_mm_per_s
 
                         print(f"Particle ID: {particle_id}, Size: {size_um}, Velocity: {velocity_mm_per_s} mm/s")
                         new_id_mapping[tuple(new.flatten())] = particle_id  # Update id mapping with NEW coordinates.
@@ -323,13 +327,13 @@ def track_particles(frame, particle_data):
 
     return results
 
-def process_frame_worker(frame_queue, data_queue, particle_data):
+def process_frame_worker(frame_queue, data_queue):
     """Process frames from the frame queue and log particle size and velocity data."""
     frame_number = 0
     while True:
         if not frame_queue.empty():
             frame = frame_queue.get()
-            results = track_particles(frame, particle_data)
+            results = track_particles(frame, particle_data, dict_lock)
             if not results:  # Log empty results for debugging
                 print(f"No particles detected in frame {frame_number}")
 
@@ -345,16 +349,18 @@ def process_frame_worker(frame_queue, data_queue, particle_data):
                         # Update shared particle data
                         print(f"Updating particle_data for Particle ID: {particle_id}")  # Debug print
 
-                        # Update shared particle data
-                        particle_data[particle_id] = {
-                            "size": size,
-                            "velocity": velocity,
-                            "trajectory": trajectory
-                        }
+                        if size is not None:
+                            # Update shared particle data
+                            particle_data[particle_id] = {
+                                "size": size,
+                                "velocity": velocity,
+                                "trajectory": trajectory
+                            }
 
-                        # Store data in queue for CSV logging
-                        print("Storing data in queue")
-                        data_queue.put((frame_number, particle_id, size, velocity, trajectory))
+                            print(f"Particle data dictionary: {particle_data}")
+
+                            # Store data in queue for CSV logging
+                            data_queue.put((frame_number, particle_id, size, velocity, trajectory))
 
             frame_number += 1
 
@@ -402,7 +408,7 @@ if __name__ == "__main__":
     #     process_pool.append(p)
 
     process_pool = [
-        mp.Process(target=process_frame_worker, args=(frame_queue, data_queue, particle_data), daemon=True)
+        mp.Process(target=process_frame_worker, args=(frame_queue, data_queue), daemon=True)
         for _ in range(num_processes)
     ]
 
@@ -413,7 +419,7 @@ if __name__ == "__main__":
         # Start PyQtGraph to update real-time plots from `data_queue`
 
     display_thread = threading.Thread(target=display_results,
-                                      args=(display_queue, frame_width, frame_height, particle_data), daemon=True)
+                                      args=(display_queue, particle_data, frame_width, frame_height), daemon=True)
     display_thread.start()
     graph_thread = threading.Thread(target=update_graph, args=(data_queue,), daemon=True)
     graph_thread.start()
