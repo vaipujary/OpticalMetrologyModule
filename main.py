@@ -3,10 +3,14 @@ import cv2
 import logging
 import numpy as np
 import os
+# Force PyQt5 usage:
+os.environ["PYQTGRAPH_QT_LIB"] = "PyQt5"
 import sys
+import random
+import time
 from OpticalMetrologyModule import OpticalMetrologyModule
 from VideoProcessor import VideoProcessor
-from PyQt5.QtWidgets import QMainWindow, QMessageBox, QDialog, QApplication, QFileDialog, QLabel, QPushButton, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QMainWindow, QMessageBox, QDialog, QApplication, QFileDialog
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen
 from PyQt5.QtCore import Qt, QTimer, QPointF
 from Custom_Widgets.Widgets import *
@@ -15,36 +19,31 @@ from videoCalibration import *
 from graphWindow import *
 from calibration import *
 from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
-import pyqtgraph as pg
-from pyqtgraph import PlotWidget
-from PyQt5 import QtCore, QtWidgets
-
-
 
 # Set up logging configuration.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-def setup_graph_widgets(main_window):
-    """
-    Replace static placeholders in the UI with pyqtgraph PlotWidgets.
-    """
-    # Replace size placeholder
-    size_layout = QVBoxLayout(main_window.ui.sizeGraphWidget)  # Target layout in the placeholder widget
-    main_window.size_graph = PlotWidget()  # Create the PlotWidget for size graphs
-    main_window.size_graph.setBackground('w')  # Set white background
-    main_window.size_graph.setLabel("bottom", "Particle Size (px)")
-    main_window.size_graph.setLabel("left", "Frequency")
-    main_window.size_graph.showGrid(x=True, y=True)  # Enable grid
-    size_layout.addWidget(main_window.size_graph)  # Attach PlotWidget dynamically to the layout
-
-    # Replace velocity placeholder
-    velocity_layout = QVBoxLayout(main_window.ui.velocityGraphWidget)  # Target layout in the placeholder widget
-    main_window.velocity_graph = PlotWidget()  # Create the PlotWidget for velocity graphs
-    main_window.velocity_graph.setBackground('w')  # Set white background
-    main_window.velocity_graph.setLabel("bottom", "Velocity (px/frame)")
-    main_window.velocity_graph.setLabel("left", "Frequency")
-    main_window.velocity_graph.showGrid(x=True, y=True)  # Enable grid
-    velocity_layout.addWidget(main_window.velocity_graph)  # Attach PlotWidget dynamically to the layout
+# def setup_graph_widgets(main_window):
+#     """
+#     Replace static placeholders in the UI with pyqtgraph PlotWidgets.
+#     """
+#     # Replace size placeholder
+#     size_layout = QVBoxLayout(main_window.ui.sizeGraphWidget)  # Target layout in the placeholder widget
+#     main_window.size_graph = PlotWidget()  # Create the PlotWidget for size graphs
+#     main_window.size_graph.setBackground('w')  # Set white background
+#     main_window.size_graph.setLabel("bottom", "Particle Size (px)")
+#     main_window.size_graph.setLabel("left", "Frequency")
+#     main_window.size_graph.showGrid(x=True, y=True)  # Enable grid
+#     size_layout.addWidget(main_window.size_graph)  # Attach PlotWidget dynamically to the layout
+#
+#     # Replace velocity placeholder
+#     velocity_layout = QVBoxLayout(main_window.ui.velocityGraphWidget)  # Target layout in the placeholder widget
+#     main_window.velocity_graph = PlotWidget()  # Create the PlotWidget for velocity graphs
+#     main_window.velocity_graph.setBackground('w')  # Set white background
+#     main_window.velocity_graph.setLabel("bottom", "Velocity (px/frame)")
+#     main_window.velocity_graph.setLabel("left", "Frequency")
+#     main_window.velocity_graph.showGrid(x=True, y=True)  # Enable grid
+#     velocity_layout.addWidget(main_window.velocity_graph)  # Attach PlotWidget dynamically to the layout
 
 
 ########################################################################################
@@ -52,9 +51,11 @@ def setup_graph_widgets(main_window):
 ########################################################################################
 class MainWindow(QMainWindow):
     def __init__(self):
-        QMainWindow.__init__(self)
+        # QMainWindow.__init__(self)
+        super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+
 
         # Dynamically set up the graphs
         # setup_graph_widgets(self)
@@ -75,7 +76,7 @@ class MainWindow(QMainWindow):
 
         # Apply JSON stylesheet
         loadJsonStyle(self, self.ui)
-        self.show()  # Show window
+        # self.show()  # Show window
 
         parent_widget = self.ui.menuBtn.parent()
         if parent_widget:
@@ -345,7 +346,9 @@ class VideoCalibrationDialog(QDialog):
     def display_no_camera_message(self):
         """Display a message on the videoLabel when no camera is connected."""
         self.ui.videoLabel.clear()  # Clear any existing pixmap or content
-        self.ui.videoLabel.setText("No camera connected.\nPlease check your connection or import calibration image.")
+        self.ui.videoLabel.setText('<div style="color:red; font-weight:bold; font-size:16px; text-align:center;">'
+    'No camera connected.<br>Please check your connection or import calibration image.'
+    '</div>')
         self.ui.videoLabel.setAlignment(Qt.AlignCenter)  # Center-align the text
         self.ui.videoLabel.setStyleSheet("color: red; font-size: 16px; font-weight: bold;")
 
@@ -637,48 +640,116 @@ class VideoCalibrationDialog(QDialog):
             print(f"Error while closing the VideoCalibrationDialog: {e}")
             event.accept()  # Fallback: Close dialog if cleanup fails
 
+class RealTimeVideoProcessor:
+    def __init__(self, ui_video_label):
+        self.ui_video_label = ui_video_label
+        self.cam = cv2.VideoCapture('Test Data/Videos/3.mp4')
+        self.mask = None
+        self.particle_colors = []
+        self.trajectories = []
+        self.old_gray = None
+        self.p0 = None
+        self.prev_frame_time = 0
+        self.new_frame_time = 0
+        # Parameters for goodFeaturesToTrack and Lucas-Kanade Optical Flow
+        self.feature_params = dict(maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
+        self.lk_params = dict(winSize=(15, 15), maxLevel=2,
+                              criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+    def initialize_tracking(self):
+        ret, old_frame = self.cam.read()
+        if not ret:
+            print("Error reading the video file.")
+            return False
+        self.old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
+        self.p0 = cv2.goodFeaturesToTrack(self.old_gray, mask=None, **self.feature_params)
+        if self.p0 is not None:
+            # Assign a unique color to each particle based on its index
+            self.particle_colors = {
+                i: self.get_random_color() for i in range(len(self.p0))
+            }
+        self.mask = np.zeros_like(old_frame)
+        return True
+    @staticmethod
+    def get_random_color():
+        return random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
+
+    def process_frame(self):
+        ret, frame = self.cam.read()
+        if not ret:
+            print("Video processing complete.")
+            return None
+
+        fps = self.cam.get(cv2.CAP_PROP_FPS)
+
+        # Draw FPS on the frame
+        cv2.putText(frame, f"FPS: {fps:.2f}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 255, 255), 2, cv2.LINE_AA)
+
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Calculate optical flow to get new positions of tracked points
+        p1, st, err = cv2.calcOpticalFlowPyrLK(self.old_gray, frame_gray, self.p0, None, **self.lk_params)
+        good_new = p1[st == 1] if p1 is not None else None
+        good_old = self.p0[st == 1] if self.p0 is not None else None
+
+        # If points are valid, update trajectories and draw uniform-colored lines
+        if good_new is not None and good_old is not None:
+            for i, (new, old) in enumerate(zip(good_new, good_old)):
+                a, b = int(new[0]), int(new[1])
+                c, d = int(old[0]), int(old[1])
+
+                # Draw the trajectory line in a single fixed color (e.g., green)
+                fixed_color = (0, 255, 0)  # Green color for all trajectories
+                self.mask = cv2.line(self.mask, (a, b), (c, d), fixed_color, 2)
+
+                # Append points to trajectories for further usage/analysis
+                if i >= len(self.trajectories):
+                    self.trajectories.append([(a, b)])
+                else:
+                    self.trajectories[i].append((a, b))
+                    # Trim trajectory length to at most 10 points
+                    if len(self.trajectories[i]) > 10:
+                        self.trajectories[i].pop(0)
+
+        # Combine the original frame with the updated trajectory mask
+        output = cv2.add(frame, self.mask)
+
+        # Update the state for the next frame
+        self.old_gray = frame_gray.copy()
+        self.p0 = good_new.reshape(-1, 1, 2) if good_new is not None else None
+
+        return output
+
 def main():
     app = QApplication(sys.argv)
     try:
         window = MainWindow()
-        video_processor = VideoProcessor(window.ui.videoFeedLabel, input_mode="file", video_source="Test Data/Videos/3.mp4")
+        print("WHYY")
+        video_processor = RealTimeVideoProcessor(window.ui.videoFeedLabel)
         if not video_processor.initialize_tracking():
             sys.exit(1)
-
         window.show()
 
         # Process video frame by frame
         timer = QTimer()
 
         def update_video():
-            # Process the next frame in VideoProcessor
-            processed_frame = video_processor.track_particles()
+            processed_frame = video_processor.process_frame()
             if processed_frame is None:
-                timer.stop()  # Stop the timer if no frames are returned
+                timer.stop()
                 return
-
-            # Convert OpenCV frame to PyQt QPixmap
-            rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
-            h, w, ch = rgb_frame.shape  # Get dimensions
-            bytes_per_line = ch * w
-            qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qt_image)
-
-            # Scale the QPixmap to fit QLabel dimensions
+            # Get the size of the QLabel
             label_width = window.ui.videoFeedLabel.width()
             label_height = window.ui.videoFeedLabel.height()
-            scaled_pixmap = pixmap.scaled(label_width, label_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+            resized_frame = cv2.resize(rgb_frame, (label_width, label_height), interpolation=cv2.INTER_AREA)
+            qt_image = QImage(resized_frame.data, resized_frame.shape[1], resized_frame.shape[0],
+                              resized_frame.strides[0], QImage.Format_RGB888)
+            pixmap = QPixmap.fromImage(qt_image)
+            window.ui.videoFeedLabel.setPixmap(pixmap)
 
-            # Update QLabel
-            window.ui.videoFeedLabel.setPixmap(scaled_pixmap)
-
-        # Connect the timer to update video feed every 16 ms (~60 FPS)
         timer.timeout.connect(update_video)
-        timer.start(16)
-
-        # Start the Qt application loop
+        timer.start(6)
         sys.exit(app.exec_())
-
     except Exception as e:
         print(f"An error occurred: {e}")
 
@@ -688,7 +759,49 @@ if __name__ == "__main__":
 
 
 
-
+    # app = QApplication(sys.argv)
+    # try:
+    #     window = MainWindow()
+    #     video_processor = VideoProcessor(window.ui.videoFeedLabel, input_mode="file", video_source="Test Data/Videos/3.mp4")
+    #     if not video_processor.initialize_tracking():
+    #         sys.exit(1)
+    #
+    #     window.show()
+    #
+    #     # Process video frame by frame
+    #     timer = QTimer()
+    #
+    #     def update_video():
+    #         # Process the next frame in VideoProcessor
+    #         processed_frame = video_processor.track_particles()
+    #         if processed_frame is None:
+    #             timer.stop()  # Stop the timer if no frames are returned
+    #             return
+    #
+    #         # Convert OpenCV frame to PyQt QPixmap
+    #         rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
+    #         h, w, ch = rgb_frame.shape  # Get dimensions
+    #         bytes_per_line = ch * w
+    #         qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+    #         pixmap = QPixmap.fromImage(qt_image)
+    #
+    #         # Scale the QPixmap to fit QLabel dimensions
+    #         label_width = window.ui.videoFeedLabel.width()
+    #         label_height = window.ui.videoFeedLabel.height()
+    #         scaled_pixmap = pixmap.scaled(label_width, label_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    #
+    #         # Update QLabel
+    #         window.ui.videoFeedLabel.setPixmap(scaled_pixmap)
+    #
+    #     # Connect the timer to update video feed every 16 ms (~60 FPS)
+    #     timer.timeout.connect(update_video)
+    #     timer.start(16)
+    #
+    #     # Start the Qt application loop
+    #     sys.exit(app.exec_())
+    #
+    # except Exception as e:
+    #     print(f"An error occurred: {e}")
 # class RealTimeVideoProcessor:
 #     def __init__(self, ui_video_label):
 #         self.ui_video_label = ui_video_label
