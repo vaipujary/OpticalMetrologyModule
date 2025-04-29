@@ -373,8 +373,8 @@ class OpticalMetrologyModule:
                     self.next_particle_id += 1  # Generate a new ID if needed
                 # Store the ID associated with this contour
                 contour_ids.append(microsphere_id)
-                cv2.drawContours(frame, [contour], -1, (0, 0, 255), 1)
-                cv2.ellipse(frame, ellipse, (0, 255, 0), 1)
+                cv2.drawContours(frame, [contour], -1, (0, 255, 0), 1)
+                cv2.ellipse(frame, ellipse, (0, 0, 255), 1)
 
                 # --- Collision Detection ---
                 text_size, _ = cv2.getTextSize(str(microsphere_id), cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
@@ -395,28 +395,113 @@ class OpticalMetrologyModule:
                 cv2.putText(frame, str(microsphere_id), (text_x - 15, text_y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         # Update microsphere_ids to reflect only the contours found and labeled in this frame
         self.microsphere_ids = contour_ids
-
-        # Add trajectory rendering for tracked particles (if `trajectories` exist)
-        for particle_id, trajectory in self.trajectories.items():
-            if len(trajectory) > 1:  # Render only if trajectory has at least two points
-                for j in range(1, len(trajectory)):
-                    # Get consecutive points in the trajectory
-                    x1, y1 = int(trajectory[j - 1][0] * self.scaling_factor), int(
-                        trajectory[j - 1][1] * self.scaling_factor)
-                    x2, y2 = int(trajectory[j][0] * self.scaling_factor), int(
-                        trajectory[j][1] * self.scaling_factor)
-
-                    # Draw trajectory as yellow line
-                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
-
-                # Annotate the particle ID at the last known position
-                x_last, y_last = int(trajectory[-1][0] * self.scaling_factor), int(
-                    trajectory[-1][1] * self.scaling_factor)
-                cv2.putText(frame, str(particle_id), (x_last + 5, y_last - 5),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)  # Yellow text for trajectory ID
+    #
+    #     # # Add trajectory rendering for tracked particles (if `trajectories` exist)
+    #     # for particle_id, trajectory in self.trajectories.items():
+    #     #     if len(trajectory) > 1:  # Render only if trajectory has at least two points
+    #     #         for j in range(1, len(trajectory)):
+    #     #             # Get consecutive points in the trajectory
+    #     #             x1, y1 = int(trajectory[j - 1][0] * self.scaling_factor), int(
+    #     #                 trajectory[j - 1][1] * self.scaling_factor)
+    #     #             x2, y2 = int(trajectory[j][0] * self.scaling_factor), int(
+    #     #                 trajectory[j][1] * self.scaling_factor)
+    #     #
+    #     #             # Draw trajectory as yellow line
+    #     #             cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 2)
+    #     #
+    #     #         # Annotate the particle ID at the last known position
+    #     #         x_last, y_last = int(trajectory[-1][0] * self.scaling_factor), int(
+    #     #             trajectory[-1][1] * self.scaling_factor)
+    #     #         cv2.putText(frame, str(particle_id), (x_last + 5, y_last - 5),
+    #     #                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)  # Yellow text for trajectory ID
         return frame
 
-    def calculate_size(self, current_frame, position, microsphere_id=None):
+    def calculate_and_store_microsphere_data(self, frame):
+        """
+        Detect microspheres in the current frame, calculate their size and contours,
+        and store the information in a dictionary for annotation.
+
+        Args:
+            frame: The current frame (image).
+
+        Returns:
+            A dictionary where each key is a microsphere ID and the value is a dictionary
+            with 'size' and 'contour' of the microsphere.
+        """
+        contours, frame_width, frame_height = self._preprocess_image(frame.copy())
+
+        microsphere_data = {}  # Dictionary to store detected microsphere information
+        for i, contour in enumerate(contours):
+            if len(contour) >= 5:  # Ensure there are enough points to fit an ellipse
+                try:
+                    ellipse = cv2.fitEllipse(contour)
+                    (cx, cy), (major_axis, minor_axis), angle = ellipse
+                    diameter = (major_axis + minor_axis) / 2  # Calculate equivalent diameter (size)
+
+                    # Assign a unique ID to each contour
+                    microsphere_id = self.next_particle_id
+                    self.next_particle_id += 1  # Increment the ID counter for the next particle
+
+                    # Store the size and contour in the dictionary
+                    microsphere_data[microsphere_id] = {
+                        "size": diameter,
+                        "contour": contour
+                    }
+
+                    if self.debug:
+                        # Draw the ellipse and contour
+                        cv2.drawContours(frame, [contour], -1, (0, 255, 0), 1)
+                        cv2.ellipse(frame, ellipse, (255, 0, 0), 1)
+                        cv2.putText(frame,
+                                    f"ID:{microsphere_id}, D:{diameter:.1f}px",
+                                    (int(cx), int(cy)),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.5,
+                                    (0, 255, 0),
+                                    1)
+                except Exception as e:
+                    # Handle cases where ellipse fitting fails
+                    if self.debug:
+                        print(f"Error processing contour {i}: {e}")
+        return microsphere_data
+
+    def annotate_frame_with_microsphere_data(self, frame, microsphere_data):
+        """
+        Annotate the current frame with microsphere IDs and contours using pre-stored data.
+
+        Args:
+            frame: The current frame (image).
+            microsphere_data: A dictionary of microsphere data containing their 'size' and 'contour'.
+        """
+        annotated_frame = frame.copy()
+        annotations = []
+
+        for microsphere_id, data in microsphere_data.items():
+            contour = data["contour"]
+            size = data["size"]
+
+            # Fit an ellipse to obtain center for annotation
+            if len(contour) >= 5:
+                ellipse = cv2.fitEllipse(contour)
+                (cx, cy), _, _ = ellipse
+                # Draw the contour and ellipse on the frame
+                cv2.drawContours(frame, [contour], -1, (0, 255, 0), 1)
+
+                if self.debug:
+
+                    cv2.ellipse(frame, ellipse, (255, 0, 0), 1)
+
+                # Annotate with Microsphere ID and size
+                # cv2.putText(frame,
+                #             f"ID:{microsphere_id}",
+                #             (int(cx) + 7, int(cy)),
+                #             cv2.FONT_HERSHEY_SIMPLEX,
+                #             0.5,
+                #             (0, 255, 0),
+                #             1)
+        return frame
+
+    def calculate_size(self, current_frame, position, microsphere_id):
         """
         Calculate the size of a microsphere located at a given position.
 
@@ -428,7 +513,7 @@ class OpticalMetrologyModule:
         # Extract coordinates of the feature
         x, y = int(position[0]), int(position[1])
 
-        contours, frame_width, frame_height = self._preprocess_image(current_frame.copy())  # Get the preprocessed results
+        contours, frame_width, frame_height = self._preprocess_image(current_frame)  # Get the preprocessed results
 
         # Find the contour containing the feature point
         selected_contour = None
@@ -439,7 +524,7 @@ class OpticalMetrologyModule:
             dist = abs(cv2.pointPolygonTest(contour, (x, y), True))
             # Consider only contours that contain or are very close to the point, and choose the nearest one.
             if dist < min_distance and cv2.pointPolygonTest(contour, (x, y),
-                                                        False) >= 0:  # Point inside or very near the edge
+                                                            False) >= 0:  # Point inside or very near the edge
                 min_distance = dist
                 selected_contour = contour
 
@@ -477,7 +562,69 @@ class OpticalMetrologyModule:
                     diameter = 2 * np.sqrt(area / np.pi)
                     return diameter
 
-        return None # Return None if no suitable contour is found.
+        return None
+    # def calculate_size(self, current_frame, position, microsphere_id=None):
+    #     """
+    #     Calculate the size of a microsphere located at a given position.
+    #
+    #     :param current_frame: Current image/frame with detected particles.
+    #     :param position: Tuple (x, y) of the detected feature coordinates.
+    #     :param microsphere_id: ID of the particle
+    #     :return: Measured diameter (in pixels) of the microsphere or 0 if calculation fails.
+    #     """
+    #     # Extract coordinates of the feature
+    #     x, y = int(position[0]), int(position[1])
+    #
+    #     contours, frame_width, frame_height = self._preprocess_image(current_frame.copy())  # Get the preprocessed results
+    #
+    #     # Find the contour containing the feature point
+    #     selected_contour = None
+    #     min_distance = float("inf")
+    #
+    #     for contour in contours:
+    #         # Check if point is inside or near contour
+    #         dist = abs(cv2.pointPolygonTest(contour, (x, y), True))
+    #         # Consider only contours that contain or are very close to the point, and choose the nearest one.
+    #         if dist < min_distance and cv2.pointPolygonTest(contour, (x, y),
+    #                                                     False) >= 0:  # Point inside or very near the edge
+    #             min_distance = dist
+    #             selected_contour = contour
+    #
+    #     if selected_contour is None:
+    #         if self.debug:
+    #             print(f"No valid contour found for feature at ({x}, {y})")
+    #         return None
+    #
+    #     # Fit an ellipse to get more accurate size measurement
+    #     if len(selected_contour) >= 5:
+    #         try:
+    #             ellipse = cv2.fitEllipse(selected_contour)
+    #             (cx, cy), (major_axis, minor_axis), angle = ellipse
+    #
+    #             # Calculate equivalent diameter
+    #             diameter = (major_axis + minor_axis) / 2
+    #
+    #             if self.debug:
+    #                 # Draw the contour and ellipse
+    #                 cv2.drawContours(current_frame, [selected_contour], -1, (0, 255, 0), 1)
+    #                 cv2.ellipse(current_frame, ellipse, (255, 0, 0), 1)
+    #                 cv2.putText(current_frame,
+    #                             f"ID:{microsphere_id}, D:{diameter:.1f}px",
+    #                             (int(cx), int(cy)),
+    #                             cv2.FONT_HERSHEY_SIMPLEX,
+    #                             0.5,
+    #                             (0, 255, 0),
+    #                             1)
+    #             # print(f"Calculated size for ID {microsphere_id}: {diameter:.1f}px")
+    #             return diameter
+    #         except:
+    #             # Fallback to contour area if ellipse fitting fails
+    #             area = cv2.contourArea(selected_contour)
+    #             if area > 0:
+    #                 diameter = 2 * np.sqrt(area / np.pi)
+    #                 return diameter
+    #
+    #     return None # Return None if no suitable contour is found.
 
     def calculate_velocity(self, new_x, new_y, old_x, old_y):
         """Calculate velocity from trajectory and frame rate."""

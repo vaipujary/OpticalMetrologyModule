@@ -19,11 +19,11 @@ def display_trajectories(video_path, trajectory_length=30):
                           minDistance=300,
                           blockSize=7)
 
-    # # Generate random colors for trajectories
-    def get_random_color():
-        return (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
-
-    colors = [get_random_color() for _ in range(100)]
+    # # # Generate random colors for trajectories
+    # def get_random_color():
+    #     return (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
+    #
+    # colors = [get_random_color() for _ in range(100)]
 
     # Initialize variables
     ret, old_frame = cap.read()
@@ -88,9 +88,9 @@ def display_trajectories(video_path, trajectory_length=30):
                     if (a, b) not in id_mapping:  # Still check for duplicates
                         particle_id = next_particle_id
                         next_particle_id += 1
-
-                        if particle_id >= len(colors):
-                            colors.append(get_random_color())
+                        #
+                        # if particle_id >= len(colors):
+                        #     colors.append(get_random_color())
 
                         trajectories[particle_id] = [(a, b)]
                         id_mapping[(a, b)] = particle_id
@@ -102,7 +102,7 @@ def display_trajectories(video_path, trajectory_length=30):
 
         frame_count += 1
         img = cv2.add(frame, mask)
-        cv2.imshow('frame', img)
+        cv2.imshow('Video with Real-time Trajectories', img)
         k = cv2.waitKey(30) & 0xff
         if k == 27:
             break

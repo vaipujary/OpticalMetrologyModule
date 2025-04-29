@@ -8,7 +8,7 @@ import cv2
 from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
 from OpticalMetrologyModule import OpticalMetrologyModule
 
-def load_pixels_per_mm(config_path="../config.json"):
+def load_pixels_per_mm(config_path="config.json"):
     """
     Load the pixels_per_mm value from the config.json file.
 
@@ -67,8 +67,10 @@ class VideoProcessor:
         self.frame_count = 0
         self.start_time = time.time()
         self.particle_colors = particle_colors if particle_colors is not None else {}
-        self.trajectories = trajectories if trajectories is not None else {}
-        self.id_mapping = id_mapping if id_mapping is not None else {}
+        self.trajectories = {}
+        # (trajectories) if trajectories is not None else {}
+        self.id_mapping = {}
+        # (id_mapping) if id_mapping is not None else {}
 
         self.particle_sizes = {}  # Dictionary to store sizes
         self.old_gray = None
@@ -332,6 +334,139 @@ class VideoProcessor:
         # Add trajectories to the original frame, then return:
         output = cv2.addWeighted(frame, 1, overlay, 1,
                                  0)  # Assuming 'frame' contains color information. Change accordingly if it's grayscale.
+        return output
+
+    def calculate_velocity(self, trajectory, fps):
+        """Calculate velocity from trajectory and frame rate."""
+        if len(trajectory) < 2:
+            return 0  # Cannot calculate velocity with less than two points
+
+        dx = trajectory[-1][0] - trajectory[-2][0]
+        dy = trajectory[-1][1] - trajectory[-2][1]
+
+        # Calculate distance in pixels; you'll need a scaling factor to convert to real-world units (e.g., mm) if necessary.
+        distance_pixels = np.sqrt(dx ** 2 + dy ** 2)
+
+        # Velocity in pixels per second
+        velocity = distance_pixels * fps
+
+        return velocity
+
+    def process_frame(self):
+        """Process frame, update particle trajectories, and draw on mask."""
+
+        frame = self.get_frame()
+        if frame is None:
+            print("Error: Could not grab frame.")
+            return None
+
+        self.frame_count += 1
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # Reset the mask for the current frame
+        self.mask = np.zeros_like(frame)
+
+        # 1. Manage Lost Particles and Update Trajectories
+        new_p0 = []
+        new_id_mapping = {}
+        particle_sizes = {}  # Dictionary to store sizes
+        next_particle_id = 0
+        self.scaling_factor = 41.1
+
+        if self.p0 is not None:
+            p1, st, err = cv2.calcOpticalFlowPyrLK(self.old_gray, frame_gray, self.p0, None, **self.lk_params)
+
+            if p1 is not None:
+                for i, (new, old) in enumerate(zip(p1, self.p0)):
+                    a, b = new.ravel()
+                    particle_id = self.id_mapping.get(tuple(old.ravel()))  # Use existing ID
+
+                    if particle_id is not None and st[i, 0] == 1:  # Check tracking status
+                        new_id_mapping[(a, b)] = particle_id  # Update position in ID mapping
+                        new_p0.append(new)  # Keep for next frame
+
+                        # Draw trajectory (last 10 points)
+                        if particle_id in self.trajectories:
+                            self.trajectories[particle_id].append((a, b))
+                        else:
+                            self.trajectories[particle_id] = [(a, b)]  # Initialize if new
+
+                        self.trajectories[particle_id] = self.trajectories[particle_id][-30:]
+
+                        # Size Calculation (for existing particles)
+                        size = self.optical_metrology_module.calculate_size(frame.copy(), (a, b),
+                                                                            particle_id)
+                        if size is not None:
+                            size_um = (size / self.scaling_factor) * 1000  # Store in microns
+                            particle_sizes[particle_id] = size_um  # Store size
+
+                        for k in range(1, len(self.trajectories[particle_id])):
+                            pt1 = self.trajectories[particle_id][k - 1]
+                            pt2 = self.trajectories[particle_id][k]
+                            cv2.line(self.mask, (int(pt1[0]), int(pt1[1])),
+                                     (int(pt2[0]), int(pt2[1])),
+                                     (0, 255, 0), 1)
+
+            self.p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
+            self.id_mapping = new_id_mapping  # Update the ID mapping
+
+        # 2. Detect New Particles and Assign Unique IDs
+        if self.frame_count % 10 == 0 or self.p0 is None:  # Detect new features periodically
+            new_features = cv2.goodFeaturesToTrack(frame_gray, mask=None, **self.feature_params)
+            if new_features is not None:
+                for new in new_features:
+                    a, b = new.ravel()
+
+                    if (a, b) not in self.id_mapping:  # Don't create a duplicate particle
+                        particle_id = next_particle_id  # increment ID
+                        next_particle_id += 1
+                        # self.particle_colors.append(self.get_random_color())
+                        self.trajectories[particle_id] = [(a, b)]  # Initialize trajectories
+                        self.id_mapping[(a, b)] = particle_id  # Create new particle
+                        size = self.optical_metrology_module.calculate_size(frame.copy(), (a, b),
+                                                                            particle_id)  # Size for new particles
+
+                        if size is not None:
+                            size_um = (size / self.scaling_factor) * 1000  # Convert and store size for new particles
+                            particle_sizes[particle_id] = size_um
+                            print(f"Size for particle {particle_id} is {size_um} microns")
+
+                        if self.p0 is not None:
+                            self.p0 = np.vstack((self.p0, new.reshape(-1, 1, 2)))
+                        else:
+                            self.p0 = new.reshape(-1, 1, 2)
+
+        self.frame_count += 1
+        output = cv2.add(frame, self.mask)
+
+        # Add velocity calculation and ID display *after* drawing trajectories:
+        if self.p0 is not None:  # Check if particles are being tracked
+            # Create a copy of trajectories keys for safe iteration while modifying
+            tracked_particle_ids = list(self.trajectories.keys())
+
+            for particle_id in tracked_particle_ids:  # Use copy of keys here
+                if particle_id in self.id_mapping.values():  # Check if still tracked
+                    velocity = self.calculate_velocity(self.trajectories[particle_id], self.fps)
+                    x, y = self.trajectories[particle_id][-1]
+                    # Convert velocity to mm/s if you have a scaling factor (pixels/mm). For example:
+                    scaling_factor = 41.1
+                    velocity_mm_per_s = velocity / scaling_factor
+
+                    size_um = self.particle_sizes.get(particle_id)
+                    # cv2.putText(output, f"ID:{particle_id} V:{velocity_mm_per_s:.2f} mm/s", (int(x) + 5, int(y) + 5),
+                    #             cv2.FONT_HERSHEY_SIMPLEX, 0.5, self.particle_colors[particle_id], 2)
+                else:  # Particle is no longer tracked (removed from ID mapping)
+                    del self.trajectories[particle_id]  # Remove trajectory from list
+                    # Remove particles from self.po
+                    indices_to_remove = []
+                    for i, (new, old) in enumerate(zip(self.p0, self.p0)):
+                        existing_particle_id = self.id_mapping.get(tuple(old.ravel()))  # Use existing ID
+                        if particle_id == existing_particle_id:
+                            indices_to_remove.append(i)
+                    self.p0 = np.delete(self.p0, indices_to_remove, axis=0)
+
+        self.old_gray = frame_gray.copy()
+
         return output
 # def process_frame(self, save_data_enabled=False):
     #     """Process frame, update particle trajectories, and draw on mask."""

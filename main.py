@@ -1,4 +1,7 @@
-import json
+import json, tempfile, shutil
+import math
+from collections import deque
+
 import cv2
 import logging
 import numpy as np
@@ -10,55 +13,29 @@ import random
 import time
 from OpticalMetrologyModule import OpticalMetrologyModule
 from VideoProcessor import VideoProcessor
-from PyQt5.QtWidgets import QMainWindow, QMessageBox, QDialog, QApplication, QFileDialog
+from PyQt5.QtWidgets import QMessageBox, QDialog, QApplication, QFileDialog
 from PyQt5.QtGui import QPixmap, QImage, QPainter, QPen
 from PyQt5.QtCore import Qt, QTimer, QPointF
 from Custom_Widgets.Widgets import *
 from mainWindow import *
 from videoCalibration import *
-from graphWindow import *
 from calibration import *
 from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
 
 # Set up logging configuration.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# def setup_graph_widgets(main_window):
-#     """
-#     Replace static placeholders in the UI with pyqtgraph PlotWidgets.
-#     """
-#     # Replace size placeholder
-#     size_layout = QVBoxLayout(main_window.ui.sizeGraphWidget)  # Target layout in the placeholder widget
-#     main_window.size_graph = PlotWidget()  # Create the PlotWidget for size graphs
-#     main_window.size_graph.setBackground('w')  # Set white background
-#     main_window.size_graph.setLabel("bottom", "Particle Size (px)")
-#     main_window.size_graph.setLabel("left", "Frequency")
-#     main_window.size_graph.showGrid(x=True, y=True)  # Enable grid
-#     size_layout.addWidget(main_window.size_graph)  # Attach PlotWidget dynamically to the layout
-#
-#     # Replace velocity placeholder
-#     velocity_layout = QVBoxLayout(main_window.ui.velocityGraphWidget)  # Target layout in the placeholder widget
-#     main_window.velocity_graph = PlotWidget()  # Create the PlotWidget for velocity graphs
-#     main_window.velocity_graph.setBackground('w')  # Set white background
-#     main_window.velocity_graph.setLabel("bottom", "Velocity (px/frame)")
-#     main_window.velocity_graph.setLabel("left", "Frequency")
-#     main_window.velocity_graph.showGrid(x=True, y=True)  # Enable grid
-#     velocity_layout.addWidget(main_window.velocity_graph)  # Attach PlotWidget dynamically to the layout
-
-
 ########################################################################################
-# MAIN WINDOW CLASS
+################################ MAIN WINDOW CLASS #####################################
 ########################################################################################
 class MainWindow(QMainWindow):
+    CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
+
     def __init__(self):
         # QMainWindow.__init__(self)
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-
-
-        # Dynamically set up the graphs
-        # setup_graph_widgets(self)
 
         # Camera initialization
         self.camera_dialog = VideoCalibrationDialog(self)
@@ -70,19 +47,27 @@ class MainWindow(QMainWindow):
         self.size_bins = np.linspace(0, 100, 21)  # Modify ranges according to expected sizes
         self.velocity_bins = np.linspace(0, 50, 21)  # Modify ranges according to expected velocities
 
-        # Video capture and output settings
-        #self.cam = cv2.VideoCapture('Test Data/Videos/3.mp4')  # Provide the path to your video
-        #self.fps = int(self.cam.get(cv2.CAP_PROP_FPS))
-
         # Apply JSON stylesheet
         loadJsonStyle(self, self.ui)
-        # self.show()  # Show window
 
         parent_widget = self.ui.menuBtn.parent()
         if parent_widget:
             parent_widget.show()
 
         self.ui.menuBtn.raise_()
+
+        self.ui.videoFeedLabel.setStyleSheet(
+            "background-color: black; color: white; font-size: 18px;")
+        self.ui.videoFeedLabel.setText("Please select input type")
+
+        self.video_processor: VideoProcessor | None = None
+        self.preview_timer = QTimer(self)
+        self.preview_timer.timeout.connect(self._show_preview_frame)
+
+        # ---- settings-menu widgets (radio buttons + save) ------------
+        self.ui.fileRadioBtn.toggled.connect(self._on_radio_changed)  # optional visual feedback
+        self.ui.liveRadioBtn.toggled.connect(self._on_radio_changed)
+        self.ui.saveInputTypeBtn.clicked.connect(self._save_input_type)
 
         # Expand center menu widget size
         self.ui.settingsBtn.clicked.connect(lambda:self.ui.centerMenuContainer.expandMenu())
@@ -104,9 +89,156 @@ class MainWindow(QMainWindow):
 
         # Connect other buttons
         self.ui.cameraBtn.clicked.connect(self.open_video_calibration_dialog)
-        self.ui.graphBtn.clicked.connect(self.open_graph_window)
 
-        self.ui.saveDataCheckBox.stateChanged.connect(self.on_save_data_checkbox_changed)
+        self.ui.experimentTimeComboBox.addItems(["10 minutes", "20 minutes", "30 minutes"])
+
+        cfg = self._read_config()  # restore both settings
+        self.ui.saveDataCheckBox.setChecked(cfg.get("save_data_enabled", False))
+
+        saved_minutes = cfg.get("experiment_time_minutes", 10)
+        index = {10: 0, 20: 1, 30: 2}.get(saved_minutes, 0)
+        self.ui.experimentTimeComboBox.setCurrentIndex(index)
+
+        # connect the button last
+        self.ui.saveSettingsBtn.clicked.connect(self._save_general_settings)
+
+        # Keep track of how many points we’ve plotted so far
+        self.ptr = 0
+
+        # Store data in lists
+        self.max_points = 50
+        self.x_data_size = []
+        self.y_data_size = []
+        self.x_data_vel = []
+        self.y_data_vel = []
+
+        # (Optional) Configure the initial look of the plots
+        self.ui.sizePlotGraphicsView.setLabel('left', 'Size (microns)')
+        self.ui.sizePlotGraphicsView.setLabel('bottom', 'Particle ID')
+        self.ui.velocityPlotGraphicsView.setLabel('left', 'Velocity (mm/s)')
+        self.ui.velocityPlotGraphicsView.setLabel('bottom', 'Particle ID')
+
+        # Create a timer to update these plots periodically
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_graphs)
+        self.timer.start(500)  # update every 200 ms
+
+        # Store the time when we started
+        self.start_time = time.time()
+
+        self.timer2 = QTimer(self)
+        self.timer2.timeout.connect(self.update_elapsed_time)
+        self.timer2.start(1000)  # 1 second interval
+
+    def _save_general_settings(self):
+        """Persist checkbox + experiment duration to config.json."""
+        # --- gather values from the UI --------------------------
+        save_data = self.ui.saveDataCheckBox.isChecked()
+
+        text = self.ui.experimentTimeComboBox.currentText()  # "20 minutes"
+        minutes = int(text.split()[0])  # 10 / 20 / 30
+
+        # --- merge with the existing config --------------------
+        cfg = self._read_config()
+        cfg["save_data_enabled"] = save_data
+        cfg["experiment_time_minutes"] = minutes
+
+        self._write_config(cfg)
+
+        QMessageBox.information(self, "Settings", "Settings saved!")
+
+    def _on_radio_changed(self):
+        # Optional: immediately highlight the label so the user sees which one is active
+        if self.ui.fileRadioBtn.isChecked():
+            self.ui.videoFeedLabel.setText("File input selected – click Save")
+        elif self.ui.liveRadioBtn.isChecked():
+            self.ui.videoFeedLabel.setText("Live input selected – click Save")
+
+    def _save_input_type(self):
+        # 1) Which radio button is on?
+        if self.ui.fileRadioBtn.isChecked():
+            input_mode = "file"
+        elif self.ui.liveRadioBtn.isChecked():
+            input_mode = "live"
+        else:
+            QMessageBox.warning(self, "Input type", "Please choose File or Live first.")
+            return
+
+        # 2) Load existing config (if any) ---------------------------------
+        try:
+            if os.path.exists(self.CONFIG_PATH):
+                with open(self.CONFIG_PATH, "r") as f:
+                    cfg = json.load(f)
+            else:
+                cfg = {}
+        except (json.JSONDecodeError, OSError):
+            # Start fresh if the file is corrupt / unreadable
+            cfg = {}
+
+        # 3) Update just the key you care about ---------------------------
+        cfg["input_mode"] = input_mode  # add / overwrite this one field
+
+        # 4) Write back atomically so we never lose the file ---------------
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(self.CONFIG_PATH))
+        try:
+            with os.fdopen(tmp_fd, "w") as tmp:
+                json.dump(cfg, tmp, indent=4)
+            shutil.move(tmp_path, self.CONFIG_PATH)
+        finally:
+            if os.path.exists(tmp_path):  # clean up on failure
+                os.remove(tmp_path)
+
+        # 5) Launch the preview immediately -------------------------------
+        try:
+            self._start_preview(input_mode)
+        except Exception as e:
+            QMessageBox.critical(self, "Cannot start preview", str(e))
+
+    def _start_preview(self, input_mode):
+        # Guard: clean up a previous processor if the user flips choices
+        if self.video_processor is not None:
+            self.video_processor._cleanup_resources()
+            self.preview_timer.stop()
+            self.video_processor = None
+
+        if input_mode == "file":
+            video_path, _ = QFileDialog.getOpenFileName(
+                self, "Choose video file", "", "Videos (*.mp4 *.avi *.mov)")
+            if not video_path:
+                self.ui.videoFeedLabel.setText("No file chosen.")
+                return
+            self.video_processor = VideoProcessor(
+                ui_video_label=self.ui.videoFeedLabel,
+                input_mode="file",
+                video_source=video_path)
+
+        else:  # live
+            self.video_processor = VideoProcessor(
+                ui_video_label=self.ui.videoFeedLabel,
+                input_mode="live")
+
+        # Immediately begin the raw preview (no tracking yet)
+        self.preview_timer.start(0)
+
+    def _show_preview_frame(self):
+        if not self.video_processor:
+            return
+
+        frame = self.video_processor.get_frame()
+        if frame is None:
+            # End of file or camera error
+            self.preview_timer.stop()
+            self.ui.videoFeedLabel.setText("Preview stopped.")
+            return
+
+        # Paint the BGR frame into the QLabel
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, _ = rgb.shape
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg).scaled(
+            self.ui.videoFeedLabel.size(), Qt.KeepAspectRatio,
+            Qt.SmoothTransformation)
+        self.ui.videoFeedLabel.setPixmap(pix)
 
     def open_video_calibration_dialog(self):
         # Show the dialog (modal, blocks interaction with the main window)
@@ -116,61 +248,94 @@ class MainWindow(QMainWindow):
         # Show the window
         self.graph_window.show()
 
+    def update_elapsed_time(self):
+        """Called by QTimer every second to update the label."""
+        elapsed_seconds = time.time() - self.start_time
+        minutes, seconds = divmod(elapsed_seconds, 60)
+        # Format as MM:SS
+        self.ui.timeElapsedLabel.setText(f"{int(minutes):02}:{int(seconds):02}")
+
+    def update_graphs(self):
+        # Increment our frame/index counter
+        self.ptr += 1
+
+        # Create new random data points
+        new_size = np.random.uniform(10, 50)
+        new_vel = np.random.uniform(1, 20)
+
+        # Append to our data arrays
+        self.x_data_size.append(self.ptr)
+        self.y_data_size.append(new_size)
+
+        self.x_data_vel.append(self.ptr)
+        self.y_data_vel.append(new_vel)
+
+        # If we exceed max_points, discard the oldest
+        if len(self.x_data_size) > self.max_points:
+            self.x_data_size.pop(0)
+            self.y_data_size.pop(0)
+        if len(self.x_data_vel) > self.max_points:
+            self.x_data_vel.pop(0)
+            self.y_data_vel.pop(0)
+
+        # Clear existing plots before drawing new data
+        self.ui.sizePlotGraphicsView.clear()
+        self.ui.velocityPlotGraphicsView.clear()
+
+        # Plot as scatter plots (no pen, just symbols)
+        self.ui.sizePlotGraphicsView.plot(
+            self.x_data_size, self.y_data_size,
+            pen=None,  # no connecting line
+            symbol='o',  # circle markers
+            symbolSize=8,  # marker size
+            symbolBrush='red'  # fill color
+        )
+
+        self.ui.velocityPlotGraphicsView.plot(
+            self.x_data_vel, self.y_data_vel,
+            pen=None,
+            symbol='o',
+            symbolSize=8,
+            symbolBrush='blue'
+        )
+
+        # Set the x-range to show the newest max_points values
+        # e.g., [self.ptr - max_points, self.ptr], so the plot "scrolls"
+        left_bound = max(0, self.ptr - self.max_points)
+        right_bound = self.ptr
+        self.ui.sizePlotGraphicsView.setXRange(left_bound, right_bound, padding=0)
+        self.ui.velocityPlotGraphicsView.setXRange(left_bound, right_bound, padding=0)
+
     def on_save_data_checkbox_changed(self, state):
-        if state == QtCore.Qt.Checked:
-            logging.info("Save Data option enabled.")
-        else:
-            logging.info("Save Data option disabled.")
+        enabled = (state == Qt.Checked)
 
-    # def get_current_frame(self):
-    #     ret, frame = self.cam.read()
-    #     if not ret:  # End of video or error
-    #         self.cam.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Restart video if needed
-    #         logging.info("Restarting video playback.")
-    #         ret, frame = self.cam.read()
-    #     return frame if ret else None
+        cfg = self._read_config()  # merge, don’t overwrite
+        cfg["save_data_enabled"] = enabled
+        self._write_config(cfg)
 
-########################################################################################
-# GRAPH WINDOW CLASS
-########################################################################################
-# class GraphWindow(QMainWindow):
-#     def __init__(self, parent=None):
-#         super().__init__(parent)
-#         self.ui = uic.loadUi("SizeandVelocityGraph.ui", self)
-#
-#
-#         self.size_graph = self.findChild(PlotWidget, "sizeGraphWidget")
-#         self.velocity_graph = self.findChild(PlotWidget, "velocityGraphWidget")
-#         # self.show()
-#         # Set up the plot widgets
-#         self.setup_plots()
-#
-#
-#     def setup_plots(self):
-#         # Configure size graph
-#         self.size_graph.setBackground('w')
-#         self.size_graph.setLabel("bottom", "Particle Size (px)")
-#         self.size_graph.setLabel("left", "Frequency")
-#         self.size_graph.showGrid(x=True, y=True)
-#
-#         # Configure velocity graph
-#         self.velocity_graph.setBackground('w')
-#         self.velocity_graph.setLabel("bottom", "Velocity (px/frame)")
-#         self.velocity_graph.setLabel("left", "Frequency")
-#         self.velocity_graph.showGrid(x=True, y=True)
-#
-#
-#     def update_graphs(self):
-#         # Update size graph
-#         self.size_graph.clear()
-#         self.size_graph.plot(self.size_data, pen='b', symbol='o')
-#
-#         # Update velocity graph
-#         self.velocity_graph.clear()
-#         self.velocity_graph.plot(self.velocity_data, pen='r', symbol='x')
+        logging.info("Save Data option %s.", "enabled" if enabled else "disabled")
+
+    # ----------  helpers for reading / writing config --------------
+    def _read_config(self) -> dict:
+        """Return existing JSON config or empty dict if file missing/bad."""
+        try:
+            with open(self.CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def _write_config(self, cfg: dict) -> None:
+        """Atomically replace the config file with the supplied dict."""
+        import tempfile, os, shutil
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(self.CONFIG_PATH))
+        with os.fdopen(tmp_fd, "w") as tmp:
+            json.dump(cfg, tmp, indent=4)
+        shutil.move(tmp_path, self.CONFIG_PATH)
+    # ---------------------------------------------------------------
+
 
 ########################################################################################
-# CALIBRATION DIALOG CLASS
+############################ CALIBRATION DIALOG CLASS ##################################
 ########################################################################################
 class CalibrationDialog(QDialog):
     def __init__(self, distance, parent=None):
@@ -261,7 +426,7 @@ class CalibrationDialog(QDialog):
         event.ignore()  # Stop the default close behavior
 
 ########################################################################################
-# VIDEO CALIBRATION DIALOG CLASS
+######################### VIDEO CALIBRATION DIALOG CLASS ###############################
 ########################################################################################
 class VideoCalibrationDialog(QDialog):
     def __init__(self, parent = None):
@@ -303,6 +468,7 @@ class VideoCalibrationDialog(QDialog):
         self.start_point = None
         self.end_point = None
         self.screenshot_pixmap = None
+        self.scaled_pixmap = None
         self.painter = None
         self.original_image = None
         self.x_scale = None
@@ -393,22 +559,22 @@ class VideoCalibrationDialog(QDialog):
         label_height = self.ui.videoLabel.height()
 
         # Scale the QPixmap to fit within the videoLabel while maintaining aspect ratio
-        scaled_pixmap = pixmap.scaled(label_width, label_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.scaled_pixmap = pixmap.scaled(label_width, label_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
         # Store scaling factors for click mapping
-        self.x_scale = w / scaled_pixmap.width()  # Width scaling factor
-        self.y_scale = h / scaled_pixmap.height()  # Height scaling factor
+        self.x_scale = w / self.scaled_pixmap.width()  # Width scaling factor
+        self.y_scale = h / self.scaled_pixmap.height()  # Height scaling factor
 
         # Calculate offsets, including safety adjustment
-        self.x_offset = max((label_width - scaled_pixmap.width()) // 2, 0)
-        self.y_offset = max((label_height - scaled_pixmap.height()) // 2, 0)
+        self.x_offset = (label_width - self.scaled_pixmap.width()) // 2
+        self.y_offset = (label_height - self.scaled_pixmap.height()) // 2
 
         print(f"Image Size: {w}x{h}, QLabel Size: {label_width}x{label_height}")
         print(f"Scale Factors: x_scale={self.x_scale}, y_scale={self.y_scale}")
         print(f"Offsets: x_offset={self.x_offset}, y_offset={self.y_offset}")
 
         # Set the scaled pixmap to the videoLabel
-        self.ui.videoLabel.setPixmap(scaled_pixmap)
+        self.ui.videoLabel.setPixmap(self.scaled_pixmap)
 
     def start_video_feed(self):
         self.timer = self.startTimer(6)  # Timer event updates every 6ms
@@ -480,98 +646,64 @@ class VideoCalibrationDialog(QDialog):
         self.ui.videoLabel.mousePressEvent = self.select_point
 
     def select_point(self, event):
-        """Handle mouse click events for point selection."""
         if not self.measurement_started:
-            print("Measurement has not started. Please click the Measure button first.")
-            return  # Do nothing if measurement has not been started
-
-        # Ensure the QLabel has a pixmap and it's not null
-        pixmap = self.ui.videoLabel.pixmap()
-        if pixmap is None or pixmap.isNull():
-            print("No image available to measure.")
             return
 
-        # Fetch the scaling applied to the pixmap inside the QLabel
-        label_width = self.ui.videoLabel.width()
-        label_height = self.ui.videoLabel.height()
-        pixmap_width = pixmap.width()
-        pixmap_height = pixmap.height()
+        # ---------------- click inside QLabel ----------------
+        click_x, click_y = event.pos().x(), event.pos().y()
 
-        # Calculate the scaled width and height while maintaining aspect ratio
-        scaled_pixmap_width = pixmap_width
-        scaled_pixmap_height = pixmap_height
-        if pixmap_width > label_width or pixmap_height > label_height:
-            scaled_pixmap = pixmap.scaled(label_width, label_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            scaled_pixmap_width = scaled_pixmap.width()
-            scaled_pixmap_height = scaled_pixmap.height()
-
-        # Calculate where the scaled pixmap is being drawn inside the QLabel
-        x_offset = (label_width - scaled_pixmap_width) / 2
-        y_offset = (label_height - scaled_pixmap_height) / 2
-
-        # Get the click's position in the QLabel
-        click_x = event.pos().x()
-        click_y = event.pos().y()
-
-        # Ensure the click is within the bounds of the displayed pixmap
-        if click_x < x_offset or click_x > (x_offset + scaled_pixmap_width) or click_y < y_offset or click_y > (y_offset + scaled_pixmap_height):
+        # click must fall on the displayed pixmap
+        if not (self.x_offset <= click_x <= self.x_offset + self.scaled_pixmap.width() and
+                self.y_offset <= click_y <= self.y_offset + self.scaled_pixmap.height()):
             print("Click was outside the displayed image.")
             return
 
-        # Map the QLabel click position to the pixmap's coordinates
-        img_x = (click_x - x_offset) * pixmap_width / scaled_pixmap_width
-        img_y = (click_y - y_offset) * pixmap_height / scaled_pixmap_height
+        # --------------- original-image coordinates ---------------
+        img_x = (click_x - self.x_offset) * self.x_scale
+        img_y = (click_y - self.y_offset) * self.y_scale
 
-        # Copy existing pixmap so we don't overwrite the original
-        updated_pixmap = pixmap.copy()
+        # --------------- displayed-pixmap coordinates -------------
+        disp_x = click_x - self.x_offset  # or  img_x / self.x_scale
+        disp_y = click_y - self.y_offset  # or  img_y / self.y_scale
 
-        # Start drawing on the updated pixmap
-        painter = QPainter(updated_pixmap)
-        pen = QPen(Qt.red, 2)  # Set pen color and thickness for drawing
-        painter.setPen(pen)
-        painter.setBrush(Qt.red) # Use red brush for circles
+        # ------- draw on a copy of the pixmap currently shown -----
+        pixmap = self.ui.videoLabel.pixmap()
+        updated = pixmap.copy()
 
-        # Circle radius for point indication
-        point_radius = 3
+        painter = QPainter(updated)
+        painter.setPen(QPen(Qt.red, 2))
+        painter.setBrush(Qt.red)
 
-        # Log the result for debugging
-        print(f"Click Position: ({click_x}, {click_y}) => Image Coordinates: ({img_x}, {img_y})")
+        r = 3  # point radius
 
-        # Handle the point selection logic (e.g., drawing points, lines, or storing coordinates)
         if self.start_point is None:
-            # First point selection
-            self.start_point = (img_x, img_y)
-            print(f"Start Point: ({img_x:.2f}, {img_y:.2f})")
-            painter.drawEllipse(QPointF(img_x, img_y), point_radius, point_radius)  # Draw circle at the first point
+            # first point
+            self.start_point = (img_x, img_y)  # for distance
+            self.start_display_pt = (disp_x, disp_y)  # for drawing
+            painter.drawEllipse(QPointF(*self.start_display_pt), r, r)
 
         elif self.end_point is None:
-            # Second point selection
+            # second point
             self.end_point = (img_x, img_y)
-            print(f"End Point: ({img_x:.2f}, {img_y:.2f})")
-            painter.drawEllipse(QPointF(img_x, img_y), point_radius, point_radius)  # Draw circle at the second point
+            end_display_pt = (disp_x, disp_y)
 
-            # Draw a line between start and end points
-            painter.drawLine(QPointF(self.start_point[0], self.start_point[1]),
-                             QPointF(self.end_point[0], self.end_point[1]))
+            painter.drawEllipse(QPointF(*end_display_pt), r, r)
+            painter.drawLine(QPointF(*self.start_display_pt), QPointF(*end_display_pt))
 
-            # Calculate and display the distance
+            # ---------- distance ----------
             self.distance = self.calculate_and_display_distance()
-            # Adding the text near the midpoint of the line
-            mid_x = (self.start_point[0] + self.end_point[0]) / 2
-            mid_y = (self.start_point[1] + self.end_point[1]) / 2
+
+            # put label near the middle of the displayed line
+            mid_x = (self.start_display_pt[0] + end_display_pt[0]) / 2
+            mid_y = (self.start_display_pt[1] + end_display_pt[1]) / 2
             painter.setPen(QPen(Qt.white))
             painter.drawText(QPointF(mid_x + 10, mid_y - 10), f"{self.distance:.2f} px")
 
-            # Reset start and end points for the next measurement
-            self.start_point = None
-            self.end_point = None
-            print("Measurement complete.")
+            # reset for next measurement
+            self.start_point = self.end_point = None
 
-            # Finish painting
         painter.end()
-
-        # Update the QLabel with the newly drawn pixmap
-        self.ui.videoLabel.setPixmap(updated_pixmap)
+        self.ui.videoLabel.setPixmap(updated)
 
     def draw_grid(self):
         """Draw a grid over the current image displayed in the videoLabel."""
@@ -611,7 +743,7 @@ class VideoCalibrationDialog(QDialog):
             # Distance in pixels using Euclidean distance formula
             dx = self.end_point[0] - self.start_point[0]
             dy = self.end_point[1] - self.start_point[1]
-            distance = (dx ** 2 + dy ** 2) ** 0.5
+            distance = math.hypot(dx, dy)
 
             print(f"Measured Distance: {distance:.2f} pixels")  # Log to console
             return distance
@@ -643,340 +775,249 @@ class VideoCalibrationDialog(QDialog):
 class RealTimeVideoProcessor:
     def __init__(self, ui_video_label):
         self.ui_video_label = ui_video_label
-        self.cam = cv2.VideoCapture('Test Data/Videos/3.mp4')
+
+        # Open video (can be from camera or file)
+        self.cam = cv2.VideoCapture('Test Data/Videos/video1.mp4')
+        if not self.cam.isOpened():
+            raise ValueError("Error opening the video file or stream.")
+
         self.mask = None
-        self.particle_colors = []
-        self.trajectories = []
         self.old_gray = None
-        self.p0 = None
-        self.prev_frame_time = 0
-        self.new_frame_time = 0
-        # Parameters for goodFeaturesToTrack and Lucas-Kanade Optical Flow
-        self.feature_params = dict(maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
-        self.lk_params = dict(winSize=(15, 15), maxLevel=2,
-                              criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
+        self.p0 = None  # Will store feature points
+        self.frame_count = 0
+
+        # --- Particle Tracking Data ---
+        # Dictionary to store each particle's trajectory: {pid: deque of (x,y)}
+        self.trajectories = {}
+        # Maps (x, y) => pid for identifying which particle a point belongs to
+        self.id_mapping = {}
+        # Next available unique Particle ID
+        self.next_particle_id = 0
+        # Track how many consecutive frames each pid has been lost
+        self.lost_counts = {}
+        # Maximum stored trajectory length
+        self.trajectory_length = 30
+
+        # LK parameters (matching your particle_tracking approach)
+        self.lk_params = dict(winSize=(20, 20),
+                              maxLevel=4,
+                              criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.03))
+
+        # GoodFeaturesToTrack parameters (matching your particle_tracking approach)
+        self.feature_params = dict(maxCorners=50,
+                                   qualityLevel=0.4,
+                                   minDistance=300,
+                                   blockSize=7)
+
     def initialize_tracking(self):
+        """Reads the first frame, creates initial mask, and does first feature detection."""
         ret, old_frame = self.cam.read()
         if not ret:
-            print("Error reading the video file.")
+            print("Error reading the first frame from the video file.")
             return False
+
         self.old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
+        self.mask = np.zeros_like(old_frame)
+
+        # Detect initial features
         self.p0 = cv2.goodFeaturesToTrack(self.old_gray, mask=None, **self.feature_params)
         if self.p0 is not None:
-            # Assign a unique color to each particle based on its index
-            self.particle_colors = {
-                i: self.get_random_color() for i in range(len(self.p0))
-            }
-        self.mask = np.zeros_like(old_frame)
+            # Assign new PIDs to the initial set of points
+            for pt in self.p0:
+                x, y = pt.ravel()
+                particle_id = self.next_particle_id
+                self.next_particle_id += 1
+                # Start a new trajectory (use deque with maxlen)
+                self.trajectories[particle_id] = deque(maxlen=self.trajectory_length)
+                self.trajectories[particle_id].append((x, y))
+                # Map the coordinates to the particle ID
+                self.id_mapping[(x, y)] = particle_id
+                # Initialize lost-count to 0
+                self.lost_counts[particle_id] = 0
+
         return True
-    @staticmethod
-    def get_random_color():
-        return random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
 
     def process_frame(self):
+        """Grab a new frame, run optical flow + re-detection, return the combined overlay."""
         ret, frame = self.cam.read()
-        if not ret:
-            print("Video processing complete.")
+        if not ret or frame is None:
+            print("Video processing complete (no more frames).")
             return None
 
-        fps = self.cam.get(cv2.CAP_PROP_FPS)
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Draw FPS on the frame
-        cv2.putText(frame, f"FPS: {fps:.2f}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 255, 255), 2, cv2.LINE_AA)
+        # Clear (reset) the overlay each iteration
+        self.mask.fill(0)
 
-        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        # Step A: Mark all known particles as "lost" until they are recovered
+        for pid in list(self.lost_counts.keys()):
+            self.lost_counts[pid] += 1
 
-        # Calculate optical flow to get new positions of tracked points
-        p1, st, err = cv2.calcOpticalFlowPyrLK(self.old_gray, frame_gray, self.p0, None, **self.lk_params)
-        good_new = p1[st == 1] if p1 is not None else None
-        good_old = self.p0[st == 1] if self.p0 is not None else None
+        # Step B: If we have old points, apply Lucas-Kanade optical flow
+        new_p0 = []
+        new_id_mapping = {}
+        if self.p0 is not None:
+            p1, st, err = cv2.calcOpticalFlowPyrLK(
+                self.old_gray, gray, self.p0, None, **self.lk_params
+            )
+            if p1 is not None:
+                for i, (new, old) in enumerate(zip(p1, self.p0)):
+                    a, b = new.ravel()
+                    c, d = old.ravel()
 
-        # If points are valid, update trajectories and draw uniform-colored lines
-        if good_new is not None and good_old is not None:
-            for i, (new, old) in enumerate(zip(good_new, good_old)):
-                a, b = int(new[0]), int(new[1])
-                c, d = int(old[0]), int(old[1])
+                    # If old position is recognized, track continuity
+                    if (c, d) in self.id_mapping:
+                        pid = self.id_mapping[(c, d)]
+                        new_id_mapping[(a, b)] = pid
 
-                # Draw the trajectory line in a single fixed color (e.g., green)
-                fixed_color = (0, 255, 0)  # Green color for all trajectories
-                self.mask = cv2.line(self.mask, (a, b), (c, d), fixed_color, 2)
+                    # If the flow is valid, keep the new point
+                    particle_id = self.id_mapping.get((c, d))
+                    if particle_id is not None and st[i, 0] == 1:
+                        new_id_mapping[(a, b)] = particle_id
+                        new_p0.append(new)
 
-                # Append points to trajectories for further usage/analysis
-                if i >= len(self.trajectories):
-                    self.trajectories.append([(a, b)])
-                else:
-                    self.trajectories[i].append((a, b))
-                    # Trim trajectory length to at most 10 points
-                    if len(self.trajectories[i]) > 10:
-                        self.trajectories[i].pop(0)
+                        # Update that particle's trajectory
+                        if particle_id not in self.trajectories:
+                            self.trajectories[particle_id] = deque(maxlen=self.trajectory_length)
+                        self.trajectories[particle_id].append((a, b))
 
-        # Combine the original frame with the updated trajectory mask
-        output = cv2.add(frame, self.mask)
+                        # Reset lost count (we're still seeing it)
+                        self.lost_counts[particle_id] = 0
 
-        # Update the state for the next frame
-        self.old_gray = frame_gray.copy()
-        self.p0 = good_new.reshape(-1, 1, 2) if good_new is not None else None
+                        # Draw the trajectory lines
+                        pts = list(self.trajectories[particle_id])
+                        for k in range(1, len(pts)):
+                            pt1 = pts[k - 1]
+                            pt2 = pts[k]
+                            cv2.line(self.mask,
+                                     (int(pt1[0]), int(pt1[1])),
+                                     (int(pt2[0]), int(pt2[1])),
+                                     (0, 255, 0), 1)
 
-        return output
+            # Update p0 and ID mapping
+            self.p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
+            self.id_mapping = new_id_mapping
+
+        # Step C: Periodically re-detect new features (or if p0 is empty)
+        if self.frame_count % 10 == 0 or self.p0 is None:
+            kernel = np.ones((5, 5), np.uint8)
+            tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
+            _, binary = cv2.threshold(tophat, 100, 255, cv2.THRESH_BINARY)
+
+            new_features = cv2.goodFeaturesToTrack(binary, mask=None, **self.feature_params)
+            if new_features is not None:
+                threshold_dist = 5.0
+                for new in new_features:
+                    a, b = new.ravel()
+                    existing_id = None
+
+                    # Check if this new point is near an already-tracked point
+                    for (old_x, old_y), stored_pid in self.id_mapping.items():
+                        dx = old_x - a
+                        dy = old_y - b
+                        dist_sq = dx*dx + dy*dy
+                        if dist_sq < (threshold_dist * threshold_dist):
+                            existing_id = stored_pid
+                            break
+
+                    if existing_id is not None:
+                        # Already tracked => just update our mapping so (a, b) is the same PID
+                        self.id_mapping[(a, b)] = existing_id
+                        if self.p0 is not None:
+                            self.p0 = np.vstack((self.p0, new.reshape(-1, 1, 2)))
+                        else:
+                            self.p0 = new.reshape(-1, 1, 2)
+
+                    else:
+                        # It's a brand-new point => assign a new PID
+                        pid = self.next_particle_id
+                        self.next_particle_id += 1
+                        self.trajectories[pid] = deque(maxlen=self.trajectory_length)
+                        self.trajectories[pid].append((a, b))
+                        self.id_mapping[(a, b)] = pid
+                        # Also initialize lost_count for the new PID
+                        self.lost_counts[pid] = 0
+
+                        if self.p0 is not None:
+                            self.p0 = np.vstack((self.p0, new.reshape(-1, 1, 2)))
+                        else:
+                            self.p0 = new.reshape(-1, 1, 2)
+
+        # Step D: Remove particles that are "lost" too long
+        for pid in list(self.lost_counts.keys()):
+            if self.lost_counts[pid] > 50:
+                # Remove from trajectories
+                if pid in self.trajectories:
+                    del self.trajectories[pid]
+                # Remove from id_mapping
+                to_remove = []
+                for (x, y), stored_pid in self.id_mapping.items():
+                    if stored_pid == pid:
+                        to_remove.append((x, y))
+                for point in to_remove:
+                    del self.id_mapping[point]
+                # Finally remove from lost_counts
+                del self.lost_counts[pid]
+
+        # Step E: Combine the frame with the mask to visualize trajectories
+        combined = cv2.add(frame, self.mask)
+
+        # Update old_gray for next iteration
+        self.old_gray = gray.copy()
+
+        self.frame_count += 1
+
+        return combined
+
+# def main():
+#     app = QApplication(sys.argv)
+#     try:
+#         window = MainWindow()
+#
+#         # Create the modified processor (with ID-based tracking)
+#         video_processor = RealTimeVideoProcessor(window.ui.videoFeedLabel)
+#         if not video_processor.initialize_tracking():
+#             sys.exit(1)
+#
+#         window.show()
+#
+#         # Process video frame by frame via timer
+#         timer = QTimer()
+#         def update_video():
+#             processed_frame = video_processor.process_frame()
+#             if processed_frame is None:
+#                 timer.stop()
+#                 return
+#
+#             label_width = window.ui.videoFeedLabel.width()
+#             label_height = window.ui.videoFeedLabel.height()
+#
+#             rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
+#             resized_frame = cv2.resize(rgb_frame, (label_width, label_height), interpolation=cv2.INTER_AREA)
+#
+#             qt_image = QImage(resized_frame.data,
+#                               resized_frame.shape[1],
+#                               resized_frame.shape[0],
+#                               resized_frame.strides[0],
+#                               QImage.Format_RGB888)
+#             pixmap = QPixmap.fromImage(qt_image)
+#             window.ui.videoFeedLabel.setPixmap(pixmap)
+#
+#         timer.timeout.connect(update_video)
+#         timer.start(6)
+#
+#         sys.exit(app.exec_())
+#
+#     except Exception as e:
+#         print(f"An error occurred: {e}")
 
 def main():
     app = QApplication(sys.argv)
-    try:
-        window = MainWindow()
-        print("WHYY")
-        video_processor = RealTimeVideoProcessor(window.ui.videoFeedLabel)
-        if not video_processor.initialize_tracking():
-            sys.exit(1)
-        window.show()
 
-        # Process video frame by frame
-        timer = QTimer()
+    window = MainWindow()       # <- owns VideoProcessor & all timers
+    window.show()
 
-        def update_video():
-            processed_frame = video_processor.process_frame()
-            if processed_frame is None:
-                timer.stop()
-                return
-            # Get the size of the QLabel
-            label_width = window.ui.videoFeedLabel.width()
-            label_height = window.ui.videoFeedLabel.height()
-            rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-            resized_frame = cv2.resize(rgb_frame, (label_width, label_height), interpolation=cv2.INTER_AREA)
-            qt_image = QImage(resized_frame.data, resized_frame.shape[1], resized_frame.shape[0],
-                              resized_frame.strides[0], QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qt_image)
-            window.ui.videoFeedLabel.setPixmap(pixmap)
-
-        timer.timeout.connect(update_video)
-        timer.start(6)
-        sys.exit(app.exec_())
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    sys.exit(app.exec_())       # start the event-loop
 
 if __name__ == "__main__":
     main()
-
-
-
-
-    # app = QApplication(sys.argv)
-    # try:
-    #     window = MainWindow()
-    #     video_processor = VideoProcessor(window.ui.videoFeedLabel, input_mode="file", video_source="Test Data/Videos/3.mp4")
-    #     if not video_processor.initialize_tracking():
-    #         sys.exit(1)
-    #
-    #     window.show()
-    #
-    #     # Process video frame by frame
-    #     timer = QTimer()
-    #
-    #     def update_video():
-    #         # Process the next frame in VideoProcessor
-    #         processed_frame = video_processor.track_particles()
-    #         if processed_frame is None:
-    #             timer.stop()  # Stop the timer if no frames are returned
-    #             return
-    #
-    #         # Convert OpenCV frame to PyQt QPixmap
-    #         rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)  # Convert BGR to RGB
-    #         h, w, ch = rgb_frame.shape  # Get dimensions
-    #         bytes_per_line = ch * w
-    #         qt_image = QImage(rgb_frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-    #         pixmap = QPixmap.fromImage(qt_image)
-    #
-    #         # Scale the QPixmap to fit QLabel dimensions
-    #         label_width = window.ui.videoFeedLabel.width()
-    #         label_height = window.ui.videoFeedLabel.height()
-    #         scaled_pixmap = pixmap.scaled(label_width, label_height, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-    #
-    #         # Update QLabel
-    #         window.ui.videoFeedLabel.setPixmap(scaled_pixmap)
-    #
-    #     # Connect the timer to update video feed every 16 ms (~60 FPS)
-    #     timer.timeout.connect(update_video)
-    #     timer.start(16)
-    #
-    #     # Start the Qt application loop
-    #     sys.exit(app.exec_())
-    #
-    # except Exception as e:
-    #     print(f"An error occurred: {e}")
-# class RealTimeVideoProcessor:
-#     def __init__(self, ui_video_label):
-#         self.ui_video_label = ui_video_label
-#         self.cam = cv2.VideoCapture('Test Data/Videos/3.mp4')
-#
-#         # Get the video's actual FPS
-#         self.fps = int(self.cam.get(cv2.CAP_PROP_FPS))
-#         print(f"Video is running at {self.fps} FPS.")
-#
-#         self.mask = None
-#         self.particle_colors = []
-#         self.trajectories = []
-#         self.old_gray = None
-#         self.p0 = None
-#         self.prev_frame_time = 0
-#         self.new_frame_time = 0
-#         # For FPS calculation
-#         self.frame_count = 0
-#         self.start_time = time.time()
-#         self.prev_frame_time = 0
-#         self.new_frame_time = 0
-#         # Parameters for goodFeaturesToTrack and Lucas-Kanade Optical Flow
-#         self.feature_params = dict(maxCorners=100, qualityLevel=0.3, minDistance=7, blockSize=7)
-#         self.lk_params = dict(winSize=(15, 15), maxLevel=2,
-#                               criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
-#
-#     def initialize_tracking(self):
-#         ret, old_frame = self.cam.read()
-#         if not ret:
-#             print("Error reading the video file.")
-#             return False
-#         self.old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
-#         self.p0 = cv2.goodFeaturesToTrack(self.old_gray, mask=None, **self.feature_params)
-#         if self.p0 is not None:
-#             # Assign a unique color to each particle based on its index
-#             self.particle_colors = {
-#                 i: self.get_random_color() for i in range(len(self.p0))
-#             }
-#         self.mask = np.zeros_like(old_frame)
-#         return True
-#
-#     @staticmethod
-#     def get_random_color():
-#         return random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)
-#
-#     def process_frame(self):
-#         ret, frame = self.cam.read()
-#         if not ret:
-#             print("Video processing complete.")
-#             return None
-#
-#         # Calculate FPS using moving average
-#         self.frame_count += 1
-#         elapsed_time = time.time() - self.start_time
-#
-#         if elapsed_time > 0:
-#             current_fps = self.frame_count / elapsed_time
-#             # Reset counters every second to maintain accuracy
-#             if elapsed_time > 1:
-#                 self.frame_count = 0
-#                 self.start_time = time.time()
-#         else:
-#             current_fps = self.fps
-#
-#         # Draw FPS on the frame
-#         cv2.putText(frame, f"FPS: {int(current_fps)}",
-#                     (10, 80),
-#                     cv2.FONT_HERSHEY_SIMPLEX,
-#                     3, (255, 255, 255), 2,
-#                     cv2.LINE_AA)
-#
-#         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-#
-#         # Calculate optical flow to get new positions of tracked points
-#         p1, st, err = cv2.calcOpticalFlowPyrLK(self.old_gray, frame_gray, self.p0, None, **self.lk_params)
-#         good_new = p1[st == 1] if p1 is not None else None
-#         good_old = self.p0[st == 1] if self.p0 is not None else None
-#
-#         # If points are valid, update trajectories and draw uniform-colored lines
-#         if good_new is not None and good_old is not None:
-#             for i, (new, old) in enumerate(zip(good_new, good_old)):
-#                 a, b = int(new[0]), int(new[1])
-#                 c, d = int(old[0]), int(old[1])
-#
-#                 # Draw the trajectory line in a single fixed color (e.g., green)
-#                 fixed_color = (0, 255, 0)  # Green color for all trajectories
-#                 self.mask = cv2.line(self.mask, (a, b), (c, d), fixed_color, 2)
-#
-#                 # Append points to trajectories for further usage/analysis
-#                 if i >= len(self.trajectories):
-#                     self.trajectories.append([(a, b)])
-#                 else:
-#                     self.trajectories[i].append((a, b))
-#                     # Trim trajectory length to at most 10 points
-#                     if len(self.trajectories[i]) > 10:
-#                         self.trajectories[i].pop(0)
-#
-#         # Combine the original frame with the updated trajectory mask
-#         output = cv2.add(frame, self.mask)
-#
-#         # Update the state for the next frame
-#         self.old_gray = frame_gray.copy()
-#         self.p0 = good_new.reshape(-1, 1, 2) if good_new is not None else None
-#
-#         return output
-
-    # def select_point(self, event):
-    #     """Handle mouse click events for point selection."""
-    #     if not self.measurement_started:
-    #         print("Measurement has not started. Please press the Measure button first.")
-    #         return  # Do nothing if measurement has not been started
-    #
-    #     # Ensure the QLabel has a pixmap and it's not null
-    #     pixmap = self.ui.videoLabel.pixmap()
-    #     if pixmap is None or pixmap.isNull():  # Ensure there is a pixmap to draw on
-    #         print("No pixmap available to draw on.")
-    #         return
-    #
-    #     # Get the position of the click in QLabel coordinates
-    #     click_x = event.pos().x()
-    #     click_y = event.pos().y()
-    #
-    #     # Adjust for QLabel padding offsets
-    #     adjusted_x = click_x - self.x_offset
-    #     adjusted_y = click_y - self.y_offset
-    #
-    #     # Ensure the click is within the displayed region
-    #     if adjusted_x < 0 or adjusted_y < 0:
-    #         print("Click outside the displayed image")
-    #         return
-    #     if adjusted_x > self.ui.videoLabel.pixmap().width() or adjusted_y > self.ui.videoLabel.pixmap().height():
-    #         print("Click outside the displayed image")
-    #         return
-    #
-    #     # Map QLabel click position to original image coordinates
-    #     img_x = int(adjusted_x * self.x_scale)
-    #     img_y = int(adjusted_y * self.y_scale)
-    #
-    #     # Debug the adjusted coordinates
-    #     print(f"Click QLabel Position: ({click_x}, {click_y})")
-    #     print(f"Adjusted Position: ({adjusted_x}, {adjusted_y}) -> Original Image: ({img_x}, {img_y})")
-    #
-    #     # Handle point selection
-    #     pixmap = self.ui.videoLabel.pixmap().copy()
-    #
-    #     if pixmap:
-    #
-    #         # Create a painter object to draw on the image
-    #         self.painter = QPainter(pixmap)
-    #         pen = QPen(Qt.red, 2, Qt.SolidLine)
-    #         self.painter.setPen(pen)
-    #
-    #         # Draw the circle for the selected point
-    #         point_radius = 3
-    #
-    #         if self.start_point is None:
-    #             # Store the first point
-    #             self.start_point = QPoint(img_x, img_y)
-    #             print(f"First Point Selected: ({img_x}, {img_y})")
-    #             # Draw a circle at the first point
-    #             self.painter.drawEllipse(event.pos(), point_radius, point_radius)
-    #
-    #         elif self.end_point is None:
-    #             # Store the second point
-    #             self.end_point = QPoint(img_x, img_y)
-    #             print(f"Second Point Selected: ({img_x}, {img_y})")
-    #             # Draw the circle at the second point
-    #             self.painter.drawEllipse(event.pos(), point_radius, point_radius)
-    #
-    #             self.painter.drawLine(self.start_point, self.end_point)  # Draw a line connecting the two points
-    #
-    #             # Calculate distance and draw the result
-    #             self.calculate_and_display_distance(self.painter)
-    #
-    #         self.painter.end()
-    #
-    #         # Update the videoLabel with the updated pixmap
-    #         self.ui.videoLabel.setPixmap(pixmap)

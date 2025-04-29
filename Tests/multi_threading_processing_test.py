@@ -16,7 +16,7 @@ import datetime
 from OpticalMetrologyModule import OpticalMetrologyModule
 
 # Initialize video capture
-cap = cv2.VideoCapture("../Test Data/Videos/MicrosphereVideo3.avi")
+cap = cv2.VideoCapture("../Test Data/Videos/MicrosphereVideo3_10Min.mp4")
 
 # Parameters for Lucas-Kanade optical flow
 lk_params = dict(winSize=(20, 20),
@@ -426,6 +426,7 @@ if __name__ == "__main__":
     capture_thread.start()
 
     num_processes = mp.cpu_count() - 1
+    print(f"Starting {num_processes} processes for particle tracking.")
 
     process_pool = [
         mp.Process(target=process_frame_worker, args=(frame_queue, data_queue, particle_data), daemon=True)

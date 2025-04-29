@@ -9,11 +9,38 @@ import datetime
 import sys
 import numpy as np
 import pyqtgraph as pg
-from PyQt5 import QtWidgets, uic
+# from PyQt5 import QtWidgets, uic
 from PyQt5.QtCore import QTimer
 from pyqtgraph import PlotWidget
 from example import Ui_MainWindow
 from PyQt5.QtWidgets import QLabel
+import sys
+from PyQt5.QtWidgets import QApplication, QMainWindow
+import pyqtgraph as pg
+from pyqtgraph import PlotWidget
+
+
+def main():
+    # Optionally disable OpenGL if you suspect GPU issues
+    pg.setConfigOptions(useOpenGL=False)
+
+    app = QApplication(sys.argv)
+
+    class TestWindow(QMainWindow):
+        def __init__(self):
+            super().__init__()
+            plot = PlotWidget()
+            self.setCentralWidget(plot)
+            # Just add some test data
+            plot.plot([1, 2, 3, 4], [10, 20, 5, 15])
+
+    w = TestWindow()
+    w.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
 
 #
 # class Window(QtWidgets.QMainWindow):
@@ -95,25 +122,25 @@ from PyQt5.QtWidgets import QLabel
 
 
 
+# #
+# #
+# class MainWindow(QtWidgets.QMainWindow):
+#     def __init__(self):
+#         super(MainWindow, self).__init__()
+#         uic.loadUi("example.ui", self)
+#         self.graphWidget = self.findChild(PlotWidget, "graphWidget")
 #
+#         self.graphWidget.showGrid(x=True, y=True)
 #
-class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
-        super(MainWindow, self).__init__()
-        uic.loadUi("example.ui", self)
-        self.graphWidget = self.findChild(PlotWidget, "graphWidget")
-
-        self.graphWidget.showGrid(x=True, y=True)
-
-        self.show()
-
-def main():
-    app = QtWidgets.QApplication(sys.argv)
-    UIWindow = MainWindow()
-    app.exec_()
-
-if __name__ == "__main__":
-    main()
+#         self.show()
+#
+# def main():
+#     app = QtWidgets.QApplication(sys.argv)
+#     UIWindow = MainWindow()
+#     app.exec_()
+#
+# if __name__ == "__main__":
+#     main()
 
 
 #         super().__init__()

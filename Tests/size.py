@@ -5,6 +5,12 @@ import math
 import numpy as np
 
 particle_id_counter = 0
+# Tunable parameters (put them at module scope if you prefer)
+CLAHE_CLIP        = 2.0       # contrast-enhancement strength
+CLAHE_TILE        = (8, 8)    # tile size for CLAHE
+BLUR_KSIZE        = (5, 5)    # Gaussian blur kernel
+OTSU_OFFSET       = -32       # “tighten” threshold: +N → stricter (smaller blobs)
+MIN_AREA_PX       = 5         # noise reject  (same as before)
 
 def load_pixels_per_mm(config_path="../config.json"):
     """
@@ -42,6 +48,7 @@ def measure_particles_from_contours(contours, microns_per_pixel=1.0,
     measurements = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
+        print("Area: ", area, "pixels")
         if area < min_area or area > max_area:
             continue
 
@@ -83,12 +90,14 @@ def measure_particles_from_contours(contours, microns_per_pixel=1.0,
                 is_elliptical = True
 
             # Compute "average diameter" from major/minor axis
-            avg_diam_pixels = 0.5 * (MA + ma)
+            avg_diam_pixels = 0.5*(MA + ma)
             ellipse_diameter_um = avg_diam_pixels * microns_per_pixel
 
             # Store the ellipse parameters
             ellipse_info = ellipse
-
+        print("Diameter in px: ", area_diameter_pixels)
+        print("Diameter in um: ", area_diameter_um)
+        print("Ellipse Diameter: ", area_diameter_um)
         # Collect all into a dictionary
         measurements.append({
             "centroid": (cx, cy),
@@ -122,14 +131,14 @@ def draw_results_on_image(image_bgr, measurements, contour_color=(255,0,0), elli
         cv2.drawContours(result_img, [cnt], -1, contour_color, thickness)
 
         # 2) If ellipse was successfully fit, optionally draw it in green
-        # if ellipse_info is not None:
-        #     cv2.ellipse(result_img, ellipse_info, ellipse_color, thickness)
-        #
-        # # 3) Choose label text
-        # if is_elliptical and ellipse_diam is not None:
-        #     text_label = f"{ellipse_diam:.1f} um"
-        # else:
-        text_label = f"{area_diam:.1f} um"
+        if ellipse_info is not None:
+            cv2.ellipse(result_img, ellipse_info, ellipse_color, thickness)
+
+        # 3) Choose label text
+        if is_elliptical and ellipse_diam is not None:
+            text_label = f"{ellipse_diam:.1f} um"
+        else:
+            text_label = f"{area_diam:.1f} um"
 
         # 4) Put text near the centroid
         cv2.putText(
@@ -145,174 +154,215 @@ def draw_results_on_image(image_bgr, measurements, contour_color=(255,0,0), elli
 
     return result_img
 
-def method_1_otsu_threshold(image_path, microns_per_pixel=1.0):
-    gray, img_bgr = load_grayscale(image_path)
+def method_1_otsu_threshold(image_path: str,
+                            microns_per_pixel: float):
+    """Return (annotated_BGR, measurements_list).  Uses stricter mask so contours
+       hug the real particle boundary more closely."""
+    gray, img_bgr = load_grayscale(image_path)          # your helper
 
-    # 1) Slight blur
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    # 1) boost local contrast → helps when illumination is uneven
+    clahe  = cv2.createCLAHE(clipLimit=CLAHE_CLIP,
+                             tileGridSize=CLAHE_TILE)
+    enhanced = clahe.apply(gray)
 
-    # 2) Otsu’s threshold
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    # 2) slight blur
+    blurred   = cv2.GaussianBlur(enhanced, BLUR_KSIZE, 0)
 
-    # 3) Find contours
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # 3) Otsu to *get* the threshold, then tighten it by OTSU_OFFSET
+    t_otsu, _ = cv2.threshold(blurred, 0, 255,
+                              cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+    strict_t  = max(0, t_otsu + OTSU_OFFSET)          # push it upward
+    _, binary = cv2.threshold(blurred, strict_t, 255,
+                              cv2.THRESH_BINARY)
 
-    # 4) Measure the particles from contours
+    # 6) contours
+    contours, _ = cv2.findContours(binary,
+                                   cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
+
+    # 7) measure
     measurements = measure_particles_from_contours(
         contours,
         microns_per_pixel=microns_per_pixel,
-        min_area=4,
+        min_area=MIN_AREA_PX,
         max_area=1e6
     )
 
-    # 5) Draw results
-    result_img = draw_results_on_image(img_bgr, measurements, contour_color=(255, 0, 0), ellipse_color=(255, 0, 0))
-
+    # 8) annotate & return
+    result_img = draw_results_on_image(img_bgr,
+                                       measurements,
+                                       contour_color=(255, 0, 0),
+                                       ellipse_color=(255, 0, 0),  # green ellipse for clarity
+                                       thickness=1)
     return result_img, measurements
+# def method_1_otsu_threshold(image_path, microns_per_pixel):
+#     gray, img_bgr = load_grayscale(image_path)
+#
+#     # 1) Slight blur
+#     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+#
+#     # 2) Otsu’s threshold
+#     _, binary = cv2.threshold(blurred, 200, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+#
+#     # 3) Find contours
+#     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#
+#     # 4) Measure the particles from contours
+#     measurements = measure_particles_from_contours(
+#         contours,
+#         microns_per_pixel=microns_per_pixel,
+#         min_area=4,
+#         max_area=1e6
+#     )
+#
+#     # 5) Draw results
+#     result_img = draw_results_on_image(img_bgr, measurements, contour_color=(255, 0, 0), ellipse_color=(255, 0, 0))
+#
+#     return result_img, measurements
 
 
-def method_3_watershed(image_path, microns_per_pixel=1.0):
-    gray, img_bgr = load_grayscale(image_path)
+# def method_3_watershed(image_path, microns_per_pixel=1.0):
+#     gray, img_bgr = load_grayscale(image_path)
+#
+#     kernel_tophat = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+#     tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel_tophat)
+#
+#     # (b) Slight blur to reduce noise (tune as needed)
+#     blurred = cv2.GaussianBlur(tophat, (5, 5), 0)
+#
+#     # 1) Basic Otsu threshold (or any other threshold) to find "sure foreground"
+#     _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+#
+#     # 2) Morphological opening to remove noise
+#     # 3) (Optional) Morphological closing
+#     #    If your particles have small holes or are slightly fragmented,
+#     #    a closing step can help unify them.
+#     kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+#     closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close, iterations=1)
+#
+#     # 4) Morphological opening to remove small noise
+#     #    Use fewer iterations or smaller kernel to avoid losing tiny particles.
+#     kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+#     opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel_open, iterations=1)
+#
+#     # 3) Sure background by dilating the opening result
+#     sure_bg = cv2.dilate(opened, kernel_open, iterations=2)
+#
+#     # 4) Distance transform for the "sure foreground"
+#     dist_transform = cv2.distanceTransform(opened, cv2.DIST_L2, 5)
+#
+#     # 5) Threshold distance transform to define the sure foreground region
+#     dist_thresh = 0.5 * dist_transform.max()
+#     _, sure_fg = cv2.threshold(dist_transform, dist_thresh, 255, 0)
+#     sure_fg = np.uint8(sure_fg)
+#
+#     # 6) Unknown region (neither sure fg nor sure bg)
+#     unknown = cv2.subtract(sure_bg, sure_fg)
+#
+#     # 7) Connected components -> markers
+#     num_markers, markers = cv2.connectedComponents(sure_fg)
+#     markers = markers + 1
+#     markers[unknown == 255] = 0
+#
+#     # 8) Watershed
+#     img_for_watershed = img_bgr.copy()
+#     cv2.watershed(img_for_watershed, markers)
+#
+#     # 9) Build contours from each unique marker > 1
+#     measurements = []
+#     for label_id in range(2, num_markers + 2):
+#         label_mask = np.uint8(markers == label_id)
+#         cnts, _ = cv2.findContours(label_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+#         if len(cnts) == 0:
+#             continue
+#
+#         for cnt in cnts:
+#             area = cv2.contourArea(cnt)
+#             if area < 5:
+#                 continue
+#
+#             # --- Compute Centroid ---
+#             M = cv2.moments(cnt)
+#             if M["m00"] == 0:
+#                 continue
+#             cx = int(M["m10"] / M["m00"])
+#             cy = int(M["m01"] / M["m00"])
+#
+#             # --- Area-based diameter (circular assumption) ---
+#             area_diameter_pixels = math.sqrt((4.0 * area) / math.pi)
+#             area_diameter_um = area_diameter_pixels * microns_per_pixel
+#
+#             # --- Ellipse-based measurements ---
+#             is_elliptical = False
+#             ellipse_info = None
+#             ellipse_diameter_um = None
+#             major_axis_um = None
+#             minor_axis_um = None
+#             aspect_ratio = None
+#
+#             if len(cnt) >= 5:
+#                 ellipse = cv2.fitEllipse(cnt)
+#                 (ex, ey), (MA, ma), angle = ellipse
+#
+#                 major_axis_um = MA * microns_per_pixel
+#                 minor_axis_um = ma * microns_per_pixel
+#
+#                 if MA > 0:
+#                     aspect_ratio = ma / MA
+#                 else:
+#                     aspect_ratio = 1.0
+#
+#                 # Consider elliptical if aspect_ratio < some threshold
+#                 if aspect_ratio < 0.9:
+#                     is_elliptical = True
+#
+#                 avg_diam_pixels = 0.5 * (MA + ma)
+#                 ellipse_diameter_um = avg_diam_pixels * microns_per_pixel
+#                 ellipse_info = ellipse
+#
+#             # Store dictionary for this particle
+#             measurements.append({
+#                 "centroid": (cx, cy),
+#                 "area_diameter_um": area_diameter_um,
+#                 "is_elliptical": is_elliptical,
+#                 "ellipse_diameter_um": ellipse_diameter_um,
+#                 "major_axis_um": major_axis_um,
+#                 "minor_axis_um": minor_axis_um,
+#                 "aspect_ratio": aspect_ratio,
+#                 "contour": cnt,
+#                 "ellipse_info": ellipse_info
+#             })
+#
+#     # 10) Draw results
+#     result_img = img_bgr.copy()
+#     for meas in measurements:
+#         cnt = meas["contour"]
+#         cv2.drawContours(result_img, [cnt], -1, (0, 255, 0), 1)
+#
+#         ellipse_info = meas["ellipse_info"]
+#         if ellipse_info is not None:
+#             cv2.ellipse(result_img, ellipse_info, (255, 0, 0), 1)  # e.g. draw ellipse in blue
+#
+#         (cx, cy) = meas["centroid"]
+#         if meas["is_elliptical"] and meas["ellipse_diameter_um"] is not None:
+#             text = f"{meas['ellipse_diameter_um']:.1f} um"
+#         else:
+#             text = f"{meas['area_diameter_um']:.1f} um"
+#
+#         cv2.putText(
+#             result_img,
+#             text,
+#             (cx + 5, cy + 5),
+#             cv2.FONT_HERSHEY_SIMPLEX,
+#             0.5,
+#             (255, 255, 255),
+#             1
+#         )
+#
+#     return result_img, measurements
 
-    kernel_tophat = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
-    tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel_tophat)
 
-    # (b) Slight blur to reduce noise (tune as needed)
-    blurred = cv2.GaussianBlur(tophat, (5, 5), 0)
-
-    # 1) Basic Otsu threshold (or any other threshold) to find "sure foreground"
-    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-
-    # 2) Morphological opening to remove noise
-    # 3) (Optional) Morphological closing
-    #    If your particles have small holes or are slightly fragmented,
-    #    a closing step can help unify them.
-    kernel_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel_close, iterations=1)
-
-    # 4) Morphological opening to remove small noise
-    #    Use fewer iterations or smaller kernel to avoid losing tiny particles.
-    kernel_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    opened = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel_open, iterations=1)
-
-    # 3) Sure background by dilating the opening result
-    sure_bg = cv2.dilate(opened, kernel_open, iterations=2)
-
-    # 4) Distance transform for the "sure foreground"
-    dist_transform = cv2.distanceTransform(opened, cv2.DIST_L2, 5)
-
-    # 5) Threshold distance transform to define the sure foreground region
-    dist_thresh = 0.5 * dist_transform.max()
-    _, sure_fg = cv2.threshold(dist_transform, dist_thresh, 255, 0)
-    sure_fg = np.uint8(sure_fg)
-
-    # 6) Unknown region (neither sure fg nor sure bg)
-    unknown = cv2.subtract(sure_bg, sure_fg)
-
-    # 7) Connected components -> markers
-    num_markers, markers = cv2.connectedComponents(sure_fg)
-    markers = markers + 1
-    markers[unknown == 255] = 0
-
-    # 8) Watershed
-    img_for_watershed = img_bgr.copy()
-    cv2.watershed(img_for_watershed, markers)
-
-    # 9) Build contours from each unique marker > 1
-    measurements = []
-    for label_id in range(2, num_markers + 2):
-        label_mask = np.uint8(markers == label_id)
-        cnts, _ = cv2.findContours(label_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if len(cnts) == 0:
-            continue
-
-        for cnt in cnts:
-            area = cv2.contourArea(cnt)
-            if area < 5:
-                continue
-
-            # --- Compute Centroid ---
-            M = cv2.moments(cnt)
-            if M["m00"] == 0:
-                continue
-            cx = int(M["m10"] / M["m00"])
-            cy = int(M["m01"] / M["m00"])
-
-            # --- Area-based diameter (circular assumption) ---
-            area_diameter_pixels = math.sqrt((4.0 * area) / math.pi)
-            area_diameter_um = area_diameter_pixels * microns_per_pixel
-
-            # --- Ellipse-based measurements ---
-            is_elliptical = False
-            ellipse_info = None
-            ellipse_diameter_um = None
-            major_axis_um = None
-            minor_axis_um = None
-            aspect_ratio = None
-
-            if len(cnt) >= 5:
-                ellipse = cv2.fitEllipse(cnt)
-                (ex, ey), (MA, ma), angle = ellipse
-
-                major_axis_um = MA * microns_per_pixel
-                minor_axis_um = ma * microns_per_pixel
-
-                if MA > 0:
-                    aspect_ratio = ma / MA
-                else:
-                    aspect_ratio = 1.0
-
-                # Consider elliptical if aspect_ratio < some threshold
-                if aspect_ratio < 0.9:
-                    is_elliptical = True
-
-                avg_diam_pixels = 0.5 * (MA + ma)
-                ellipse_diameter_um = avg_diam_pixels * microns_per_pixel
-                ellipse_info = ellipse
-
-            # Store dictionary for this particle
-            measurements.append({
-                "centroid": (cx, cy),
-                "area_diameter_um": area_diameter_um,
-                "is_elliptical": is_elliptical,
-                "ellipse_diameter_um": ellipse_diameter_um,
-                "major_axis_um": major_axis_um,
-                "minor_axis_um": minor_axis_um,
-                "aspect_ratio": aspect_ratio,
-                "contour": cnt,
-                "ellipse_info": ellipse_info
-            })
-
-    # 10) Draw results
-    result_img = img_bgr.copy()
-    for meas in measurements:
-        cnt = meas["contour"]
-        cv2.drawContours(result_img, [cnt], -1, (0, 255, 0), 1)
-
-        ellipse_info = meas["ellipse_info"]
-        if ellipse_info is not None:
-            cv2.ellipse(result_img, ellipse_info, (255, 0, 0), 1)  # e.g. draw ellipse in blue
-
-        (cx, cy) = meas["centroid"]
-        if meas["is_elliptical"] and meas["ellipse_diameter_um"] is not None:
-            text = f"{meas['ellipse_diameter_um']:.1f} um"
-        else:
-            text = f"{meas['area_diameter_um']:.1f} um"
-
-        cv2.putText(
-            result_img,
-            text,
-            (cx + 5, cy + 5),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
-            (255, 255, 255),
-            1
-        )
-
-    return result_img, measurements
-
-
-def test_all_methods(image_path, microns_per_pixel=1.0):
+def test_all_methods(image_path, microns_per_pixel):
     print(f"Testing different segmentation methods on {image_path}...")
 
     # Method 1
@@ -326,9 +376,9 @@ def test_all_methods(image_path, microns_per_pixel=1.0):
     # print(f"Method2: Found {len(meas2)} objects. Result saved to method2_adaptive.jpg")
 
     # Method 3 (Distance Transform + Watershed)
-    res3, meas3 = method_3_watershed(image_path, microns_per_pixel)
-    cv2.imwrite("method3_watershed.jpg", res3)
-    print(f"Method3: Found {len(meas3)} objects. Result saved to method3_watershed.jpg")
+    # res3, meas3 = method_3_watershed(image_path, microns_per_pixel)
+    # cv2.imwrite("method3_watershed.jpg", res3)
+    # print(f"Method3: Found {len(meas3)} objects. Result saved to method3_watershed.jpg")
 
 
 def main():
@@ -565,7 +615,7 @@ def annotate_frame_with_microsphere_data(frame, microsphere_data):
 
 if __name__ == "__main__":
     # main()
-    test_all_methods("../Test Data/Images/4825microspheres.jpg", microns_per_pixel=42.68)
+    test_all_methods("../Test Data/Images/4.24.kiraluxcap2 - Copy.jpg", microns_per_pixel=23.81114130434785)
 
 
 

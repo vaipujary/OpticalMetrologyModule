@@ -27,5 +27,8 @@
         }
     },
     "duplicate_distance_threshold": 15,
-    "minimum_size_threshold": 15
+    "minimum_size_threshold": 15,
+    "input_mode": "file",
+    "save_data_enabled": true,
+    "experiment_time_minutes": 10
 }
