@@ -170,14 +170,6 @@ class MainWindow(QMainWindow):
         h, w, _ = rgb.shape
         qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
         self.ui.videoFeedLabel.setPixmap(QPixmap.fromImage(qimg))
-        # rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        # h, w, _ = rgb.shape
-        # qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
-        # pix = QPixmap.fromImage(qimg).scaled(
-        #     self.ui.videoFeedLabel.size(),
-        #     Qt.KeepAspectRatio,
-        #     Qt.SmoothTransformation)
-        # self.ui.videoFeedLabel.setPixmap(pix)
 
     def _save_general_settings(self):
         """Persist checkbox + experiment duration to config.json."""
@@ -266,12 +258,12 @@ class MainWindow(QMainWindow):
                 save_data_enabled=save_data)
 
         else:  # live
-
             self.video_processor = VideoProcessor(
                 ui_video_label=self.ui.videoFeedLabel,
                 input_mode="live",
                 save_data_enabled=save_data)
 
+        self.video_processor.particles_metrics.connect(self._on_particles_updated)
         # Immediately begin the raw preview (no tracking yet)
         self.preview_timer.start(0)
 
@@ -285,8 +277,8 @@ class MainWindow(QMainWindow):
             return
         print("frame is not None")
         # Paint the BGR frame into the QLabel
-        if self.ui.videoFeedLabel.pixmap() is None:
-            self.ui.videoFeedLabel.setFixedSize(frame.width(), frame.height())
+        # if self.ui.videoFeedLabel.pixmap() is None:
+        #     self.ui.videoFeedLabel.setFixedSize(frame.width(), frame.height())
 
         self.ui.videoFeedLabel.setPixmap(QPixmap.fromImage(frame))
         # rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -314,56 +306,92 @@ class MainWindow(QMainWindow):
         # Format as MM:SS
         self.ui.timeElapsedLabel.setText(f"{int(minutes):02}:{int(seconds):02}")
 
-    def update_graphs(self):
-        # Increment our frame/index counter
-        self.ptr += 1
+    @QtCore.pyqtSlot(dict)
+    def _on_particles_updated(self, pdata: dict):
+        """
+        pdata = { 37: {'size': 12.3, 'velocity': 1.8},
+                  41: {'size':  9.9, 'velocity': 0.4}, ... }
+        """
+        if not pdata:
+            return
 
-        # Create new random data points
-        new_size = np.random.uniform(10, 50)
-        new_vel = np.random.uniform(1, 20)
+        # -------- pick the newest ≤50 IDs -------------
+        pids = sorted(pdata.keys())[-self.max_points:]
 
-        # Append to our data arrays
-        self.x_data_size.append(self.ptr)
-        self.y_data_size.append(new_size)
+        ids = []
+        sizes = []
+        velocities = []
+        for pid in pids:
+            d = pdata[pid]
+            if 'size' in d and 'velocity' in d:
+                ids.append(pid)
+                sizes.append(d['size'])
+                velocities.append(d['velocity'])
 
-        self.x_data_vel.append(self.ptr)
-        self.y_data_vel.append(new_vel)
-
-        # If we exceed max_points, discard the oldest
-        if len(self.x_data_size) > self.max_points:
-            self.x_data_size.pop(0)
-            self.y_data_size.pop(0)
-        if len(self.x_data_vel) > self.max_points:
-            self.x_data_vel.pop(0)
-            self.y_data_vel.pop(0)
-
-        # Clear existing plots before drawing new data
+        # ---------- update the two scatter plots -------
         self.ui.sizePlotGraphicsView.clear()
         self.ui.velocityPlotGraphicsView.clear()
 
-        # Plot as scatter plots (no pen, just symbols)
         self.ui.sizePlotGraphicsView.plot(
-            self.x_data_size, self.y_data_size,
-            pen=None,  # no connecting line
-            symbol='o',  # circle markers
-            symbolSize=8,  # marker size
-            symbolBrush='red'  # fill color
-        )
+            ids, sizes, pen=None, symbol='o', symbolBrush='r', symbolSize=6)
 
         self.ui.velocityPlotGraphicsView.plot(
-            self.x_data_vel, self.y_data_vel,
-            pen=None,
-            symbol='o',
-            symbolSize=8,
-            symbolBrush='blue'
-        )
+            ids, velocities, pen=None, symbol='x', symbolBrush='g', symbolSize=6)
 
-        # Set the x-range to show the newest max_points values
-        # e.g., [self.ptr - max_points, self.ptr], so the plot "scrolls"
-        left_bound = max(0, self.ptr - self.max_points)
-        right_bound = self.ptr
-        self.ui.sizePlotGraphicsView.setXRange(left_bound, right_bound, padding=0)
-        self.ui.velocityPlotGraphicsView.setXRange(left_bound, right_bound, padding=0)
+        if ids:
+            self.ui.sizePlotGraphicsView.setXRange(ids[0], ids[-1], padding=0)
+            self.ui.velocityPlotGraphicsView.setXRange(ids[0], ids[-1], padding=0)
+
+    # def update_graphs(self):
+    #     # Increment our frame/index counter
+    #     self.ptr += 1
+    #
+    #     # Create new random data points
+    #     new_size = np.random.uniform(10, 50)
+    #     new_vel = np.random.uniform(1, 20)
+    #
+    #     # Append to our data arrays
+    #     self.x_data_size.append(self.ptr)
+    #     self.y_data_size.append(new_size)
+    #
+    #     self.x_data_vel.append(self.ptr)
+    #     self.y_data_vel.append(new_vel)
+    #
+    #     # If we exceed max_points, discard the oldest
+    #     if len(self.x_data_size) > self.max_points:
+    #         self.x_data_size.pop(0)
+    #         self.y_data_size.pop(0)
+    #     if len(self.x_data_vel) > self.max_points:
+    #         self.x_data_vel.pop(0)
+    #         self.y_data_vel.pop(0)
+    #
+    #     # Clear existing plots before drawing new data
+    #     self.ui.sizePlotGraphicsView.clear()
+    #     self.ui.velocityPlotGraphicsView.clear()
+    #
+    #     # Plot as scatter plots (no pen, just symbols)
+    #     self.ui.sizePlotGraphicsView.plot(
+    #         self.x_data_size, self.y_data_size,
+    #         pen=None,  # no connecting line
+    #         symbol='o',  # circle markers
+    #         symbolSize=8,  # marker size
+    #         symbolBrush='red'  # fill color
+    #     )
+    #
+    #     self.ui.velocityPlotGraphicsView.plot(
+    #         self.x_data_vel, self.y_data_vel,
+    #         pen=None,
+    #         symbol='o',
+    #         symbolSize=8,
+    #         symbolBrush='blue'
+    #     )
+    #
+    #     # Set the x-range to show the newest max_points values
+    #     # e.g., [self.ptr - max_points, self.ptr], so the plot "scrolls"
+    #     left_bound = max(0, self.ptr - self.max_points)
+    #     right_bound = self.ptr
+    #     self.ui.sizePlotGraphicsView.setXRange(left_bound, right_bound, padding=0)
+    #     self.ui.velocityPlotGraphicsView.setXRange(left_bound, right_bound, padding=0)
 
     def on_save_data_checkbox_changed(self, state):
         enabled = (state == Qt.Checked)
@@ -654,21 +682,11 @@ class VideoCalibrationDialog(QDialog):
             return
 
         # Paint the BGR frame into the QLabel
-        if self.ui.videoLabel.pixmap() is None:
-            self.ui.videoLabel.setFixedSize(frame.width(), frame.height())
+        # if self.ui.videoLabel.pixmap() is None:
+        #     self.ui.videoLabel.setFixedSize(frame.width(), frame.height())
 
         self.ui.videoLabel.setPixmap(QPixmap.fromImage(frame))
 
-
-
-        # rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        # h, w, _ = rgb.shape
-        #
-        # if self.ui.videoLabel.width() != w or self.ui.videoLabel.height() != h:
-        #     self.ui.videoLabel.setFixedSize(w, h)
-        #
-        # qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
-        # self.ui.videoLabel.setPixmap(QPixmap.fromImage(qimg))
 
     def display_frame(self, frame):
         # Convert OpenCV BGR image to QImage

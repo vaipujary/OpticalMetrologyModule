@@ -6,14 +6,21 @@ import numpy as np
 import time
 import json
 import cv2
-import os, sys
+import os
+import math
 
 from PyQt5.QtGui import QImage
-
+from PyQt5.QtCore import QObject, pyqtSignal
 from tsi_singleton import get_sdk
 
 # absolute path to the folder that contains thorlabs_tsi_camera_sdk.dll
 SDK_BIN = r"C:\Users\vaipu\PycharmProjects\OpticalMetrologyModule\dlls\64_lib"
+
+CLAHE_CLIP        = 2.0       # contrast-enhancement strength
+CLAHE_TILE        = (8, 8)    # tile size for CLAHE
+BLUR_KSIZE        = (5, 5)    # Gaussian blur kernel
+OTSU_OFFSET       = -32       # “tighten” threshold: +N → stricter (smaller blobs)
+MIN_AREA_PX       = 5         # noise reject  (same as before)
 
 if SDK_BIN not in os.environ["PATH"]:
     os.environ["PATH"] = SDK_BIN + os.pathsep + os.environ["PATH"]
@@ -40,9 +47,12 @@ def load_pixels_per_mm(config_path="config.json"):
         print("Error loading pixels_per_mm from config.json:", e)
         return 1.0
 
-class VideoProcessor:
-    def __init__(self, ui_video_label, input_mode="file", video_source=None, save_data_enabled=False, particle_colors=None):
+class VideoProcessor(QObject):
+    # emit {pid: {'size': float, 'velocity': float}}
 
+    particles_metrics = pyqtSignal(dict)
+    def __init__(self, ui_video_label, input_mode="file", video_source=None, save_data_enabled=False, particle_colors=None):
+        super().__init__()
         self.save_data_enabled = save_data_enabled
 
         # Create a temporary CSV file for testing
@@ -101,6 +111,11 @@ class VideoProcessor:
         self.lk_params = dict(winSize=(15, 15), maxLevel=2,
                               criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
 
+        # -------------- real‑time graph helpers -----------------
+        self._particle_cache: dict[int, dict] = {}  # will hold last size/vel per id
+        self._last_emit = 0.0  # time of last signal emission
+        self._emit_interval = 0.20
+
         # ----------  REAL-TIME TRACKING STATE  ---------------------
         self.mask = None
         self.old_gray = None  # previous gray frame
@@ -132,6 +147,8 @@ class VideoProcessor:
     def _acquisition_loop(self):
         h, w = self.camera.image_height_pixels, self.camera.image_width_pixels
         self.camera.issue_software_trigger()  # queue first exposure
+        frame_counter = 0
+
         while self.running:
             frame = self.camera.get_pending_frame_or_null()
             if frame is None:  # no frame ready yet
@@ -144,10 +161,136 @@ class VideoProcessor:
 
             qimg = QImage(mono8.data, w, h, w, QImage.Format_Grayscale8)
             qimg.ndarray_ref = mono8  # keep backing store alive
-            # qimg = qimg.copy()
             self.latest_frame = qimg  # ← GUI will show this
 
+            # ------------- (very) light‑weight measurement --------     ⬅︎ NEW CODE
+            frame_counter += 1
+            if frame_counter % 10 == 0:  # every 10th frame ≈165/10=16Hz
+                self._update_particle_cache(mono8)  # see helper below
+
+            # ---- emit to GUI not faster than every 200ms -------------
+            now = time.time()
+            if now - self._last_emit > self._emit_interval and self._particle_cache:
+                self.particles_metrics.emit(self._particle_cache.copy())
+                self._last_emit = now
+
             self.camera.issue_software_trigger()  # queue next one
+
+    def _measure_particles(self, gray: np.ndarray) -> list:
+        """Return list of dicts ({'centroid':(x,y), 'size_um': …, …})."""
+        clahe = cv2.createCLAHE(clipLimit=self.CLAHE_CLIP,
+                                tileGridSize=self.CLAHE_TILE)
+        enhanced = clahe.apply(gray)
+        blurred = cv2.GaussianBlur(enhanced, self.BLUR_KSIZE, 0)
+
+        t_otsu, _ = cv2.threshold(blurred, 0, 255,
+                                  cv2.THRESH_BINARY | cv2.THRESH_OTSU)
+        strict_t = max(0, t_otsu + self.OTSU_OFFSET)
+        _, binary = cv2.threshold(blurred, strict_t, 255,
+                                  cv2.THRESH_BINARY)
+
+        contours, _ = cv2.findContours(binary,
+                                       cv2.RETR_EXTERNAL,
+                                       cv2.CHAIN_APPROX_SIMPLE)  # :contentReference[oaicite:0]{index=0}
+        return self._measure_from_contours(contours)
+
+    def _measure_from_contours(self, contours):
+        measurements = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            print("Area: ", area, "pixels")
+            if area < MIN_AREA_PX or area > 1e6:
+                continue
+
+            M = cv2.moments(cnt)
+            if M["m00"] == 0:
+                continue
+
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+
+            # (1) Area-based diameter, assuming circle
+            area_diameter_pixels = math.sqrt(4.0 * area / math.pi)
+            area_diameter_um = area_diameter_pixels * self.scaling_factor
+
+            is_elliptical = False
+            ellipse_info = None
+            ellipse_diameter_um = None
+            major_axis_um = None
+            minor_axis_um = None
+            aspect_ratio = None
+
+            if len(cnt) >= 5:
+                # Fit ellipse
+                ellipse = cv2.fitEllipse(cnt)
+                (center_x, center_y), (MA, ma), angle = ellipse
+                # MA and ma are in pixels (major axis, minor axis)
+                major_axis_um = MA * self.scaling_factor
+                minor_axis_um = ma * self.scaling_factor
+
+                # Aspect ratio
+                if MA > 0:
+                    aspect_ratio = ma / MA
+                else:
+                    aspect_ratio = 1.0  # fallback
+
+                # Consider it elliptical if aspect ratio is sufficiently far from 1
+                # (adjust threshold as needed, e.g., < 0.95 or < 0.90)
+                if aspect_ratio < 0.9:
+                    is_elliptical = True
+
+                # Compute "average diameter" from major/minor axis
+                avg_diam_pixels = 0.5 * (MA + ma)
+                ellipse_diameter_um = avg_diam_pixels * self.scaling_factor
+
+                # Store the ellipse parameters
+                ellipse_info = ellipse
+            print("Diameter in px: ", area_diameter_pixels)
+            print("Diameter in um: ", area_diameter_um)
+            print("Ellipse Diameter: ", area_diameter_um)
+            # Collect all into a dictionary
+            measurements.append({
+                "centroid": (cx, cy),
+                "area_diameter_um": area_diameter_um,
+                "is_elliptical": is_elliptical,
+                "ellipse_diameter_um": ellipse_diameter_um,
+                "major_axis_um": major_axis_um,
+                "minor_axis_um": minor_axis_um,
+                "aspect_ratio": aspect_ratio,
+                "contour": cnt,
+                "ellipse_info": ellipse_info
+            })
+
+        return measurements
+    # ------------------------------------------------------------------
+    def _update_particle_cache(self, gray_img: np.ndarray) -> None:
+        """
+            Build self._particle_cache{pid: {'size':µm, 'velocity':mms‑1}}.
+            Called every N‑th frame from live _acquisition_loop
+            *and* from process_frame when playing a file.
+            """
+        # --- A)sizes ----------------------------------------------------
+        measurements = self._measure_particles(gray_img)
+        by_centroid = {m["centroid"]: m for m in measurements}
+
+        # quick helper to grab the nearest contour to a track‑point
+        def nearest_size(px: float, py: float):
+            if not by_centroid:
+                return None
+            cx, cy = min(by_centroid,
+                         key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
+            return by_centroid[(cx, cy)]["area_diameter_um"]
+
+        # --- B)velocities + cache --------------------------------------
+        new_cache = {}
+        for pid, traj in self.trajectories.items():
+            if len(traj) < 2:
+                continue
+            size_um = nearest_size(*traj[-1])  # might be None
+            vel_mm = self.calculate_velocity(traj, self.fps) * self.scaling_factor / 1000.0
+            new_cache[pid] = {"size": size_um, "velocity": vel_mm}
+
+        self._particle_cache = new_cache
 
     def _setup_camera(self):
         """
@@ -206,31 +349,18 @@ class VideoProcessor:
         """Retrieve a frame from the ThorCam camera, process it into RGB format."""
         if self.input_mode == "live":
             return self.latest_frame
-            # if self.camera is not None:
-            #     # self.camera.issue_software_trigger()
-            #     frame = self.camera.get_pending_frame_or_null()
-            #     if frame is None:
-            #         # queue the *next* exposure right away
-            #         self.camera.issue_software_trigger()
-            #         return None
-            #
-            #     else:
-            #         frame.image_buffer
-            #         image_buffer_copy = np.copy(frame.image_buffer)
-            #         numpy_shaped_image = image_buffer_copy.reshape(self.camera.image_height_pixels,
-            #                                                        self.camera.image_width_pixels)
-            #         nd_image_array = np.full((self.camera.image_height_pixels, self.camera.image_width_pixels, 3), 0,
-            #                                  dtype=np.uint8)
-            #         nd_image_array[:, :, 0] = numpy_shaped_image
-            #         nd_image_array[:, :, 1] = numpy_shaped_image
-            #         nd_image_array[:, :, 2] = numpy_shaped_image
-            #
-            #         # self.camera.issue_software_trigger()
-            #         return nd_image_array
 
         elif self.input_mode == "file":
-            ret, frame = self.camera.read()
-            return frame if ret else None
+            ret, frame_bgr = self.camera.read()
+            if not ret:
+                return None
+
+            # --- convert BGR ndarray → QImage -------------
+            rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            h, w, _ = rgb.shape
+            qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+            qimg.ndarray_ref = rgb  # keep buffer alive
+            return qimg
         return None
 
     def initialize_tracking(self) -> bool:
@@ -281,6 +411,10 @@ class VideoProcessor:
             return None  # end of stream / error
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        if self.frame_count % 3 == 0:  # measure every 3rd frame
+            self._update_particle_cache(gray)
+
         if self.mask is None:  # first call safety
             self.mask = np.zeros_like(frame)
 
@@ -362,4 +496,9 @@ class VideoProcessor:
         combined = cv2.add(frame, self.mask)
         self.old_gray = gray
         self.frame_count += 1
+
+        if time.time() - self._last_emit > self._emit_interval and self._particle_cache:
+            self.particles_metrics.emit(self._particle_cache.copy())
+            self._last_emit = time.time()
+
         return combined
