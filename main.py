@@ -154,7 +154,7 @@ class MainWindow(QMainWindow):
         self.experiment_timer.timeout.disconnect() if self.experiment_timer.receivers(
             self.experiment_timer.timeout) else None
         self.experiment_timer.timeout.connect(self._show_experiment_frame)
-        gui_fps = 30
+        gui_fps = 60
         self.experiment_timer.setInterval(int(1000 / gui_fps))
         self.experiment_timer.start()
         # period_ms = int(1000 / 165.5)
@@ -169,11 +169,15 @@ class MainWindow(QMainWindow):
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, _ = rgb.shape
         qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
-        pix = QPixmap.fromImage(qimg).scaled(
-            self.ui.videoFeedLabel.size(),
-            Qt.KeepAspectRatio,
-            Qt.SmoothTransformation)
-        self.ui.videoFeedLabel.setPixmap(pix)
+        self.ui.videoFeedLabel.setPixmap(QPixmap.fromImage(qimg))
+        # rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # h, w, _ = rgb.shape
+        # qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        # pix = QPixmap.fromImage(qimg).scaled(
+        #     self.ui.videoFeedLabel.size(),
+        #     Qt.KeepAspectRatio,
+        #     Qt.SmoothTransformation)
+        # self.ui.videoFeedLabel.setPixmap(pix)
 
     def _save_general_settings(self):
         """Persist checkbox + experiment duration to config.json."""
@@ -269,7 +273,7 @@ class MainWindow(QMainWindow):
                 save_data_enabled=save_data)
 
         # Immediately begin the raw preview (no tracking yet)
-        self.preview_timer.start(6)
+        self.preview_timer.start(0)
 
     def _show_preview_frame(self):
         if not self.video_processor:
@@ -283,11 +287,22 @@ class MainWindow(QMainWindow):
         # Paint the BGR frame into the QLabel
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, _ = rgb.shape
+
+        # make the label exactly the camera size ONCE
+        if self.ui.videoFeedLabel.width() != w or self.ui.videoFeedLabel.height() != h:
+            self.ui.videoFeedLabel.setFixedSize(w, h)
+
         qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
-        pix = QPixmap.fromImage(qimg).scaled(
-            self.ui.videoFeedLabel.size(), Qt.KeepAspectRatio,
-            Qt.SmoothTransformation)
-        self.ui.videoFeedLabel.setPixmap(pix)
+        self.ui.videoFeedLabel.setPixmap(QPixmap.fromImage(qimg))
+
+
+        # rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # h, w, _ = rgb.shape
+        # qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        # pix = QPixmap.fromImage(qimg).scaled(
+        #     self.ui.videoFeedLabel.size(), Qt.KeepAspectRatio,
+        #     Qt.SmoothTransformation)
+        # self.ui.videoFeedLabel.setPixmap(pix)
 
     def open_video_calibration_dialog(self):
         # Show the dialog (modal, blocks interaction with the main window)
@@ -642,16 +657,28 @@ class VideoCalibrationDialog(QDialog):
     def update_video_feed(self):
         """Fetch the video frame from VideoProcessor and display it."""
         frame = self.video_processor.get_frame()
-        if frame is not None:
-            # Convert OpenCV frame to QImage
-            rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w, ch = rgb_image.shape
-            bytes_per_line = ch * w
-            qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-            pixmap = QPixmap.fromImage(qt_image)
 
-            # Display the pixmap on videoLabel
-            self.ui.videoLabel.setPixmap(pixmap)
+        if frame is None:
+            return
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, _ = rgb.shape
+
+        if self.ui.videoLabel.width() != w or self.ui.videoLabel.height() != h:
+            self.ui.videoLabel.setFixedSize(w, h)
+
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        self.ui.videoLabel.setPixmap(QPixmap.fromImage(qimg))
+        # if frame is not None:
+        #     # Convert OpenCV frame to QImage
+        #     rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        #     h, w, ch = rgb_image.shape
+        #     bytes_per_line = ch * w
+        #     qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        #     pixmap = QPixmap.fromImage(qt_image)
+        #
+        #     # Display the pixmap on videoLabel
+        #     self.ui.videoLabel.setPixmap(pixmap)
 
     # def timer_event(self, event):
     #     if not self.screenshot_captured:

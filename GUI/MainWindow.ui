@@ -1188,8 +1188,8 @@
                 </property>
                 <property name="minimumSize">
                  <size>
-                  <width>711</width>
-                  <height>561</height>
+                  <width>0</width>
+                  <height>0</height>
                  </size>
                 </property>
                 <property name="text">
