@@ -1,16 +1,9 @@
-import json, tempfile, shutil
-import math
-from collections import deque
-from tsi_singleton import get_sdk
-import cv2
-import logging
-import numpy as np
-import os
+import os, sys, json, tempfile, shutil, math, cv2, logging, numpy as np, time
+
 # Force PyQt5 usage:
 os.environ["PYQTGRAPH_QT_LIB"] = "PyQt5"
-import sys
-import random
-import time
+
+from tsi_singleton import get_sdk
 from OpticalMetrologyModule import OpticalMetrologyModule
 from VideoProcessor import VideoProcessor
 from PyQt5.QtWidgets import QMessageBox, QDialog, QApplication, QFileDialog
@@ -20,7 +13,6 @@ from Custom_Widgets.Widgets import *
 from mainWindow import *
 from videoCalibration import *
 from calibration import *
-from thorlabs_tsi_sdk.tl_camera import TLCameraSDK
 
 # Set up logging configuration.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -109,6 +101,8 @@ class MainWindow(QMainWindow):
         # Keep track of how many points we’ve plotted so far
         self.ptr = 0
 
+        self.all_particles: dict[int, tuple[float, float]] = {}  # pid → (size, vel)
+
         # Store data in lists
         self.max_points = 50
         self.x_data_size = []
@@ -122,6 +116,10 @@ class MainWindow(QMainWindow):
         self.ui.velocityPlotGraphicsView.setLabel('left', 'Velocity (mm/s)')
         self.ui.velocityPlotGraphicsView.setLabel('bottom', 'Particle ID')
 
+        self.size_curve = self.ui.sizePlotGraphicsView.plot(
+            [], [], pen=None, symbol='o', symbolBrush='r', symbolSize=6)
+        self.vel_curve = self.ui.velocityPlotGraphicsView.plot(
+            [], [], pen=None, symbol='x', symbolBrush='g', symbolSize=6)
         # # Create a timer to update these plots periodically
         # self.timer = QTimer()
         # self.timer.timeout.connect(self.update_graphs)
@@ -308,90 +306,39 @@ class MainWindow(QMainWindow):
 
     @QtCore.pyqtSlot(dict)
     def _on_particles_updated(self, pdata: dict):
-        """
-        pdata = { 37: {'size': 12.3, 'velocity': 1.8},
-                  41: {'size':  9.9, 'velocity': 0.4}, ... }
-        """
         if not pdata:
             return
 
-        # -------- pick the newest ≤50 IDs -------------
-        pids = sorted(pdata.keys())[-self.max_points:]
+        # 1) merge – keep last finite values but overwrite “0” placeholders
+        for pid, d in pdata.items():
+            s_new, v_new = d["size"], d["velocity"]
 
-        ids = []
-        sizes = []
-        velocities = []
-        for pid in pids:
-            d = pdata[pid]
-            if 'size' in d and 'velocity' in d:
-                ids.append(pid)
-                sizes.append(d['size'])
-                velocities.append(d['velocity'])
+            # start a record if first time we see this pid
+            if pid not in self.all_particles:
+                self.all_particles[pid] = (0.0, 0.0)
 
-        # ---------- update the two scatter plots -------
-        self.ui.sizePlotGraphicsView.clear()
-        self.ui.velocityPlotGraphicsView.clear()
+            s_old, v_old = self.all_particles[pid]
 
-        self.ui.sizePlotGraphicsView.plot(
-            ids, sizes, pen=None, symbol='o', symbolBrush='r', symbolSize=6)
+            s_final = s_new if s_new != 0 else s_old
+            v_final = v_new if v_new != 0 else v_old
+            self.all_particles[pid] = (s_final, v_final)
 
-        self.ui.velocityPlotGraphicsView.plot(
-            ids, velocities, pen=None, symbol='x', symbolBrush='g', symbolSize=6)
+        # 2) build arrays (use 0 when still unknown)
+        pids = np.fromiter(sorted(self.all_particles), dtype=int)
+        sizes = np.fromiter((self.all_particles[p][0] or 0 for p in pids),
+                            dtype=float)
+        vels = np.fromiter((self.all_particles[p][1] or 0 for p in pids),
+                           dtype=float)
 
-        if ids:
-            self.ui.sizePlotGraphicsView.setXRange(ids[0], ids[-1], padding=0)
-            self.ui.velocityPlotGraphicsView.setXRange(ids[0], ids[-1], padding=0)
+        self.size_curve.setData(pids, sizes)
+        self.vel_curve.setData(pids, vels)
 
-    # def update_graphs(self):
-    #     # Increment our frame/index counter
-    #     self.ptr += 1
-    #
-    #     # Create new random data points
-    #     new_size = np.random.uniform(10, 50)
-    #     new_vel = np.random.uniform(1, 20)
-    #
-    #     # Append to our data arrays
-    #     self.x_data_size.append(self.ptr)
-    #     self.y_data_size.append(new_size)
-    #
-    #     self.x_data_vel.append(self.ptr)
-    #     self.y_data_vel.append(new_vel)
-    #
-    #     # If we exceed max_points, discard the oldest
-    #     if len(self.x_data_size) > self.max_points:
-    #         self.x_data_size.pop(0)
-    #         self.y_data_size.pop(0)
-    #     if len(self.x_data_vel) > self.max_points:
-    #         self.x_data_vel.pop(0)
-    #         self.y_data_vel.pop(0)
-    #
-    #     # Clear existing plots before drawing new data
-    #     self.ui.sizePlotGraphicsView.clear()
-    #     self.ui.velocityPlotGraphicsView.clear()
-    #
-    #     # Plot as scatter plots (no pen, just symbols)
-    #     self.ui.sizePlotGraphicsView.plot(
-    #         self.x_data_size, self.y_data_size,
-    #         pen=None,  # no connecting line
-    #         symbol='o',  # circle markers
-    #         symbolSize=8,  # marker size
-    #         symbolBrush='red'  # fill color
-    #     )
-    #
-    #     self.ui.velocityPlotGraphicsView.plot(
-    #         self.x_data_vel, self.y_data_vel,
-    #         pen=None,
-    #         symbol='o',
-    #         symbolSize=8,
-    #         symbolBrush='blue'
-    #     )
-    #
-    #     # Set the x-range to show the newest max_points values
-    #     # e.g., [self.ptr - max_points, self.ptr], so the plot "scrolls"
-    #     left_bound = max(0, self.ptr - self.max_points)
-    #     right_bound = self.ptr
-    #     self.ui.sizePlotGraphicsView.setXRange(left_bound, right_bound, padding=0)
-    #     self.ui.velocityPlotGraphicsView.setXRange(left_bound, right_bound, padding=0)
+        # 3) make the view “scroll”
+        right = int(pids[-1])
+        left = max(right - self.max_points, 0)
+        for vb in (self.ui.sizePlotGraphicsView,
+                   self.ui.velocityPlotGraphicsView):
+            vb.setXRange(left, right, padding=0)
 
     def on_save_data_checkbox_changed(self, state):
         enabled = (state == Qt.Checked)

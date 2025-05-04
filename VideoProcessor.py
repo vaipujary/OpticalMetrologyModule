@@ -16,12 +16,6 @@ from tsi_singleton import get_sdk
 # absolute path to the folder that contains thorlabs_tsi_camera_sdk.dll
 SDK_BIN = r"C:\Users\vaipu\PycharmProjects\OpticalMetrologyModule\dlls\64_lib"
 
-CLAHE_CLIP        = 2.0       # contrast-enhancement strength
-CLAHE_TILE        = (8, 8)    # tile size for CLAHE
-BLUR_KSIZE        = (5, 5)    # Gaussian blur kernel
-OTSU_OFFSET       = -32       # “tighten” threshold: +N → stricter (smaller blobs)
-MIN_AREA_PX       = 5         # noise reject  (same as before)
-
 if SDK_BIN not in os.environ["PATH"]:
     os.environ["PATH"] = SDK_BIN + os.pathsep + os.environ["PATH"]
 
@@ -69,6 +63,11 @@ class VideoProcessor(QObject):
 
         self.camera = None
         self.fps = None
+        self.CLAHE_CLIP = 2.0  # contrast-enhancement strength
+        self.CLAHE_TILE = (8, 8)  # tile size for CLAHE
+        self.BLUR_KSIZE = (5, 5)  # Gaussian blur kernel
+        self.OTSU_OFFSET = -32  # “tighten” threshold: +N → stricter (smaller blobs)
+        self.MIN_AREA_PX = 5  # noise reject  (same as before)
 
         if input_mode == "live":
             try:
@@ -103,6 +102,7 @@ class VideoProcessor(QObject):
         self.id_mapping = {}
 
         self.particle_sizes = {}  # Dictionary to store sizes
+        self._last_size: dict[int, float] = {}  # <‑‑ remember last good size
         self.old_gray = None
         self.p0 = None
 
@@ -114,13 +114,14 @@ class VideoProcessor(QObject):
         # -------------- real‑time graph helpers -----------------
         self._particle_cache: dict[int, dict] = {}  # will hold last size/vel per id
         self._last_emit = 0.0  # time of last signal emission
-        self._emit_interval = 0.20
+        self._emit_interval = 0.05
 
         # ----------  REAL-TIME TRACKING STATE  ---------------------
         self.mask = None
         self.old_gray = None  # previous gray frame
         self.p0 = None  # points being tracked
         self.frame_count = 0
+        self.tracking_started = False  # becomes True in initialize_tracking
 
         self.trajectories = {}  # pid → deque[(x,y)]
         self.id_mapping = {}  # (x,y) → pid
@@ -138,11 +139,26 @@ class VideoProcessor(QObject):
                                    qualityLevel=0.4,
                                    minDistance=300,
                                    blockSize=7)
+
+        self.provisional = []  # list[(np.ndarray)]  new corners waiting for validation
+        self.provisional_age = []  # parallel list – how many frames we tried
+        self.provisional_traj = []  # 1‑to‑1 with provisional points
+        self.coord_to_prov = {}
+
+        self.MAX_PROV_AGE = 8  # discard if still invalid after N frames
         # -----------------------------------------------------------
 
     def __del__(self):
         """Destructor to clean up resources when the object is garbage collected."""
         self._cleanup_resources()
+
+    def _reset_tracking_state(self):
+        self.next_particle_id = 0
+        self.trajectories.clear()
+        self.id_mapping.clear()
+        self.lost_counts.clear()
+        self._last_size.clear()
+        self._particle_cache.clear()
 
     def _acquisition_loop(self):
         h, w = self.camera.image_height_pixels, self.camera.image_width_pixels
@@ -165,7 +181,7 @@ class VideoProcessor(QObject):
 
             # ------------- (very) light‑weight measurement --------     ⬅︎ NEW CODE
             frame_counter += 1
-            if frame_counter % 10 == 0:  # every 10th frame ≈165/10=16Hz
+            if self.tracking_started:  # every 10th frame ≈165/10=16Hz
                 self._update_particle_cache(mono8)  # see helper below
 
             # ---- emit to GUI not faster than every 200ms -------------
@@ -198,8 +214,7 @@ class VideoProcessor(QObject):
         measurements = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            print("Area: ", area, "pixels")
-            if area < MIN_AREA_PX or area > 1e6:
+            if area < self.MIN_AREA_PX or area > 1e6:
                 continue
 
             M = cv2.moments(cnt)
@@ -245,9 +260,6 @@ class VideoProcessor(QObject):
 
                 # Store the ellipse parameters
                 ellipse_info = ellipse
-            print("Diameter in px: ", area_diameter_pixels)
-            print("Diameter in um: ", area_diameter_um)
-            print("Ellipse Diameter: ", area_diameter_um)
             # Collect all into a dictionary
             measurements.append({
                 "centroid": (cx, cy),
@@ -262,35 +274,91 @@ class VideoProcessor(QObject):
             })
 
         return measurements
+
     # ------------------------------------------------------------------
     def _update_particle_cache(self, gray_img: np.ndarray) -> None:
         """
-            Build self._particle_cache{pid: {'size':µm, 'velocity':mms‑1}}.
-            Called every N‑th frame from live _acquisition_loop
-            *and* from process_frame when playing a file.
-            """
-        # --- A)sizes ----------------------------------------------------
-        measurements = self._measure_particles(gray_img)
-        by_centroid = {m["centroid"]: m for m in measurements}
+        Update self._particle_cache **only for tracks that have
+        both a finite size and velocity**.  Anonymous provisionals
+        are*never* added to the cache (hence never get an ID).
+        """
+        if not self.tracking_started:
+            return
 
-        # quick helper to grab the nearest contour to a track‑point
-        def nearest_size(px: float, py: float):
+        # ---- fresh size measurements (1 lookup per contour) -------------
+        meas = self._measure_particles(gray_img)
+        by_centroid = {m["centroid"]: m for m in meas}
+
+        def size_at(pt):
             if not by_centroid:
                 return None
             cx, cy = min(by_centroid,
-                         key=lambda c: (c[0] - px) ** 2 + (c[1] - py) ** 2)
+                         key=lambda c: (c[0] - pt[0]) ** 2 + (c[1] - pt[1]) ** 2)
             return by_centroid[(cx, cy)]["area_diameter_um"]
 
-        # --- B)velocities + cache --------------------------------------
+        # ---- try to *promote* provisionals ------------------------------
+        j = 0
+        while j < len(self.provisional):
+            traj = self.provisional_traj[j]
+            traj.append(traj[-1])  # keep deque size
+            if len(traj) < 2:  # need 2 pts for velocity
+                j += 1
+                continue
+
+            # (1) give the point an ID right away (size/vel might be None)
+            pid = self.next_particle_id
+            self.next_particle_id += 1
+            self.trajectories[pid] = traj
+            self._last_size[pid] = None  # unknown for the moment
+            self.lost_counts[pid] = 0
+
+            self.id_mapping[self._q(traj[-1])] = pid
+
+            # (2) move it out of the provisional lists
+            self.provisional.pop(j)
+            self.provisional_traj.pop(j)
+            self.provisional_age.pop(j)
+            continue
+        # else:
+        #     j += 1
+
+        # ---- drop very old anonymous tracks -----------------------------
+        for k in reversed(range(len(self.provisional_age))):
+            if self.provisional_age[k] > self.MAX_PROV_AGE:
+                self.provisional.pop(k)
+                self.provisional_traj.pop(k)
+                self.provisional_age.pop(k)
+
+        # ---- build / refresh visible cache ------------------------------
         new_cache = {}
         for pid, traj in self.trajectories.items():
             if len(traj) < 2:
                 continue
-            size_um = nearest_size(*traj[-1])  # might be None
-            vel_mm = self.calculate_velocity(traj, self.fps) * self.scaling_factor / 1000.0
-            new_cache[pid] = {"size": size_um, "velocity": vel_mm}
+            size_um = size_at(traj[-1]) or self._last_size.get(pid)
+            vel_mm = (self.calculate_velocity(traj, self.fps)
+                      * self.scaling_factor / 1_000.0)
 
-        self._particle_cache = new_cache
+            # remember last good size
+            if size_um is not None and np.isfinite(size_um):
+                self._last_size[pid] = size_um
+
+            # ---- NORMALISE for the GUI ----------------------------------
+            # use 0when metric missing so graphs never leave a gap
+            size_for_gui = size_um if (size_um is not None
+                                       and np.isfinite(size_um)) else 0.0
+            vel_for_gui = vel_mm if np.isfinite(vel_mm) else 0.0
+
+            new_cache[pid] = {"size": float(size_for_gui),
+                              "velocity": float(vel_for_gui)}
+        # ---- keep the coord→index map in sync -----------------------------
+        self.coord_to_prov = {self._q(pt): i
+                              for i, pt in enumerate(self.provisional)}
+        self._particle_cache.update(new_cache)
+
+        # keep only the most recent 100 IDs
+        if len(self._particle_cache) > 60:
+            for old in sorted(self._particle_cache)[:-60]:
+                self._particle_cache.pop(old, None)
 
     def _setup_camera(self):
         """
@@ -304,7 +372,7 @@ class VideoProcessor(QObject):
             raise RuntimeError("No ThorLabs cameras detected.")
 
         self.camera = self.sdk.open_camera(serials[0])
-        print("FPS!!!:", self.camera.get_measured_frame_rate_fps())
+        # print("FPS!!!:", self.camera.get_measured_frame_rate_fps())
         if self.camera is None:
             raise RuntimeError("open_camera() returned None – is the camera in use?")
 
@@ -345,6 +413,24 @@ class VideoProcessor(QObject):
                 print(f"Error disposing SDK: {e}")
             self.sdk = None
 
+    # VideoProcessor.py  (put it just after the imports inside the class)
+    def _qimage_to_bgr(self, qimg: QImage) -> np.ndarray:
+        """QImage  →  NumPy array in BGR order (for OpenCV)."""
+        qimg = qimg.convertToFormat(QImage.Format_RGB888)
+        w, h = qimg.width(), qimg.height()
+
+        ptr = qimg.bits()
+        ptr.setsize(h * w * 3)  # 3 channels
+        arr = np.frombuffer(ptr, np.uint8).reshape((h, w, 3))
+
+        return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+    @staticmethod
+    def _q(pt: tuple[float, float]) -> tuple[int, int]:
+        """Quantise a sub‑pixel corner to the nearest integer pixel centre.
+        Used as a *stable* dictionary key from one frame to the next."""
+        return (int(round(pt[0])), int(round(pt[1])))
+
     def get_frame(self):
         """Retrieve a frame from the ThorCam camera, process it into RGB format."""
         if self.input_mode == "live":
@@ -365,10 +451,18 @@ class VideoProcessor(QObject):
 
     def initialize_tracking(self) -> bool:
         """Grab first frame and seed feature points / data structures."""
-        frame = self.get_frame()
-        if frame is None:
+        self._reset_tracking_state()
+        self.tracking_started = False
+
+        frame_obj = self.get_frame()
+        if frame_obj is None:
             print("Error: couldn’t read first frame.")
             return False
+
+        if isinstance(frame_obj, QImage):
+            frame = self._qimage_to_bgr(frame_obj)
+        else:
+            frame = frame_obj
 
         self.old_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         self.mask = np.zeros_like(frame)
@@ -383,10 +477,11 @@ class VideoProcessor(QObject):
 
                 self.trajectories[pid] = deque(maxlen=self.trajectory_length)
                 self.trajectories[pid].append((x, y))
-                self.id_mapping[(x, y)] = pid
+                self.id_mapping[self._q((x, y))] = pid
                 self.lost_counts[pid] = 0
-        return True
 
+        self.tracking_started = True
+        return True
 
     def calculate_velocity(self, trajectory, fps):
         """Calculate velocity from trajectory and frame rate."""
@@ -405,100 +500,97 @@ class VideoProcessor(QObject):
         return velocity
 
     def process_frame(self):
-        """Return frame with particle trajectory overlay (no size/velocity yet)."""
-        frame = self.get_frame()
-        if frame is None:
-            return None  # end of stream / error
+        frame_obj = self.get_frame()
+        if frame_obj is None:
+            return None
 
+        frame = (self._qimage_to_bgr(frame_obj)
+                 if isinstance(frame_obj, QImage) else frame_obj)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        if self.frame_count % 3 == 0:  # measure every 3rd frame
-            self._update_particle_cache(gray)
-
-        if self.mask is None:  # first call safety
-            self.mask = np.zeros_like(frame)
-
-        self.mask.fill(0)
-
-        seen_this_frame = set()
-        # ---------- optical flow on existing points -----
-        new_p0, new_id_map = [], {}
+        # -------------------------------------------------- 1. LK update
         if self.p0 is not None:
             p1, st, _ = cv2.calcOpticalFlowPyrLK(
                 self.old_gray, gray, self.p0, None, **self.lk_params)
 
+            new_p0, new_map = [], {}
+            seen_pids = set()
+
             if p1 is not None:
-                for new, old, s in zip(p1, self.p0, st):
+                for new, old, ok in zip(p1, self.p0, st):
+                    if ok[0] != 1:
+                        continue
                     a, b = new.ravel();
                     c, d = old.ravel()
-                    pid = self.id_mapping.get((c, d))
 
-                    if pid is not None and s[0] == 1:
-                        new_id_map[(a, b)] = pid
-                        new_p0.append(new)
+                    # ------ existing ID track
+                    pid = self.id_mapping.get(self._q((c, d)))
+                    if pid is not None:
                         self.trajectories[pid].append((a, b))
-                        seen_this_frame.add(pid)
+                        new_map[self._q((a, b))] = pid
                         self.lost_counts[pid] = 0
+                        seen_pids.add(pid)
 
-                        # draw trajectory
-                        pts = list(self.trajectories[pid])
-                        for k in range(1, len(pts)):
-                            cv2.line(self.mask,
-                                     (int(pts[k - 1][0]), int(pts[k - 1][1])),
-                                     (int(pts[k][0]), int(pts[k][1])),
-                                     (0, 255, 0), 1)
+                    # ------ anonymous track
+                    else:
+                        idx = self.coord_to_prov.pop(self._q((c, d)), None)
+                        if idx is not None and idx < len(self.provisional):
+                            self.provisional[idx] = (a, b)
+                            self.provisional_traj[idx].append((a, b))
+                            self.coord_to_prov[self._q((a, b))] = idx
 
-        self.p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
-        self.id_mapping = new_id_map
+                    new_p0.append(new)
 
-        # ---------- C: re-detect new features every 10 frames -----------
+            self.p0, self.id_mapping = (
+                np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None,
+                new_map)
+
+        # -------------------------------------------------- 2. new corners
         if self.frame_count % 10 == 0 or self.p0 is None:
-            tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, np.ones((5, 5), np.uint8))
-            _, bin_ = cv2.threshold(tophat, 100, 255, cv2.THRESH_BINARY)
-
-            feats = cv2.goodFeaturesToTrack(bin_, mask=None, **self.feature_params)
+            feats = cv2.goodFeaturesToTrack(gray, mask=None, **self.feature_params)
             if feats is not None:
                 for f in feats:
-                    a, b = f.ravel()
-                    if (a, b) in self.id_mapping:
-                        continue  # skip duplicates
-                    pid = self.next_particle_id
-                    self.next_particle_id += 1
+                    x, y = f.ravel()
+                    key = self._q((x, y))
+                    if key in self.id_mapping or key in self.coord_to_prov:
+                        continue
+                    # store
+                    self.provisional.append((x, y))
+                    self.provisional_traj.append(deque([(x, y)],
+                                                       maxlen=self.trajectory_length))
+                    self.provisional_age.append(0)
+                    self.coord_to_prov[key] = len(self.provisional) - 1   # store
+                    # tell LK to track it
+                    self.p0 = (f.reshape(1, 1, 2) if self.p0 is None
+                               else np.vstack((self.p0, f.reshape(1, 1, 2))))
 
-                    self.trajectories[pid] = deque(maxlen=self.trajectory_length)
-                    self.trajectories[pid].append((a, b))
-                    self.id_mapping[(a, b)] = pid
-                    self.lost_counts[pid] = 0
-
-                    self.p0 = f.reshape(1, 1, 2) if self.p0 is None else np.vstack((self.p0, f.reshape(1, 1, 2)))
-
-        # ---------- D: cull particles lost for too long -----------------
-        for pid in list(self.lost_counts):
-            if self.lost_counts[pid] > 50:
+        # -------------------------------------------------- 3. lost IDs
+        for pid in list(self.trajectories):
+            if pid in seen_pids:
+                continue
+            self.lost_counts[pid] = self.lost_counts.get(pid, 0) + 1
+            if self.lost_counts[pid] > self.lost_threshold:
                 self.trajectories.pop(pid, None)
                 self.lost_counts.pop(pid, None)
-                self.id_mapping = {k: v for k, v in self.id_mapping.items() if v != pid}
 
-        for pid in list(self.trajectories):  # iterate over existing IDs
-            if pid in seen_this_frame:
-                self.lost_counts[pid] = 0
-            else:
-                self.lost_counts[pid] = self.lost_counts.get(pid, 0) + 1
-                if self.lost_counts[pid] > self.lost_threshold:
-                    # remove everything associated with that particle
-                    self.trajectories.pop(pid, None)
-                    self.lost_counts.pop(pid, None)
-                    # purge from id_mapping
-                    self.id_mapping = {k: v for k, v in self.id_mapping.items()
-                                       if v != pid}
-
-        # ---------- E: overlay trajectories -----------------------------
-        combined = cv2.add(frame, self.mask)
-        self.old_gray = gray
-        self.frame_count += 1
-
-        if time.time() - self._last_emit > self._emit_interval and self._particle_cache:
+        # -------------------------------------------------- 4. cache & GUI
+        self._update_particle_cache(gray)
+        if (time.time() - self._last_emit > self._emit_interval
+                and self._particle_cache):
             self.particles_metrics.emit(self._particle_cache.copy())
             self._last_emit = time.time()
 
-        return combined
+        # -------------------------------------------------- 5. draw
+        if self.mask is None:
+            self.mask = np.zeros_like(frame)
+        self.mask[:] = 0
+
+        # real IDs – green
+        for pid, tr in self.trajectories.items():
+            for p, q in zip(tr, list(tr)[1:]):
+                cv2.line(self.mask, (int(p[0]), int(p[1])),
+                         (int(q[0]), int(q[1])), (0, 255, 0), 1)
+
+        self.old_gray = gray.copy()
+        self.frame_count += 1
+        return cv2.add(frame, self.mask)
