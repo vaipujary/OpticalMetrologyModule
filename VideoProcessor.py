@@ -1,4 +1,5 @@
 import datetime
+import threading
 from collections import deque
 
 import numpy as np
@@ -64,6 +65,11 @@ class VideoProcessor:
                 self.fps = float(getattr(self.camera,
                                          "actual_frame_rate", 165))  # fps
                 self.mask = None
+                # self.latest_frame = None
+                # self.running = True
+                # self._grabber = threading.Thread(
+                #     target=self._acquisition_loop, daemon=True)
+                # self._grabber.start()
             except ImportError:
                 configure_path = None
         elif input_mode == "file" and video_source is not None:
@@ -137,7 +143,7 @@ class VideoProcessor:
             raise RuntimeError("open_camera() returned None – is the camera in use?")
 
         # basic configuration…
-        self.camera.exposure_time_us = 10000
+        self.camera.exposure_time_us = 6000
         self.camera.frame_rate_control_value = 165
         self.camera.is_frame_rate_control_enabled = True
         self.camera.frames_per_trigger_zero_for_unlimited = 0

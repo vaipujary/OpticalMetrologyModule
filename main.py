@@ -295,15 +295,6 @@ class MainWindow(QMainWindow):
         qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
         self.ui.videoFeedLabel.setPixmap(QPixmap.fromImage(qimg))
 
-
-        # rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        # h, w, _ = rgb.shape
-        # qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
-        # pix = QPixmap.fromImage(qimg).scaled(
-        #     self.ui.videoFeedLabel.size(), Qt.KeepAspectRatio,
-        #     Qt.SmoothTransformation)
-        # self.ui.videoFeedLabel.setPixmap(pix)
-
     def open_video_calibration_dialog(self):
         # Show the dialog (modal, blocks interaction with the main window)
         self.camera_dialog.show()
@@ -647,13 +638,6 @@ class VideoCalibrationDialog(QDialog):
         # Set the scaled pixmap to the videoLabel
         self.ui.videoLabel.setPixmap(self.scaled_pixmap)
 
-    # def start_video_feed(self):
-    #     self.timer = self.startTimer(6)  # Timer event updates every 6ms
-    #
-    # def stop_video_feed(self):
-    #     """Stop the QTimer to pause video feed."""
-    #     self.timer.stop()
-
     def update_video_feed(self):
         """Fetch the video frame from VideoProcessor and display it."""
         frame = self.video_processor.get_frame()
@@ -669,24 +653,6 @@ class VideoCalibrationDialog(QDialog):
 
         qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
         self.ui.videoLabel.setPixmap(QPixmap.fromImage(qimg))
-        # if frame is not None:
-        #     # Convert OpenCV frame to QImage
-        #     rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        #     h, w, ch = rgb_image.shape
-        #     bytes_per_line = ch * w
-        #     qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        #     pixmap = QPixmap.fromImage(qt_image)
-        #
-        #     # Display the pixmap on videoLabel
-        #     self.ui.videoLabel.setPixmap(pixmap)
-
-    # def timer_event(self, event):
-    #     if not self.screenshot_captured:
-    #         # Capture live feed frame
-    #         ret, frame = self.video_capture.read()
-    #         if ret:
-    #             self.current_frame = frame
-    #             self.display_frame(frame)
 
     def display_frame(self, frame):
         # Convert OpenCV BGR image to QImage
