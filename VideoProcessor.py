@@ -7,6 +7,9 @@ import time
 import json
 import cv2
 import os, sys
+
+from PyQt5.QtGui import QImage
+
 from tsi_singleton import get_sdk
 
 # absolute path to the folder that contains thorlabs_tsi_camera_sdk.dll
@@ -65,11 +68,11 @@ class VideoProcessor:
                 self.fps = float(getattr(self.camera,
                                          "actual_frame_rate", 165))  # fps
                 self.mask = None
-                # self.latest_frame = None
-                # self.running = True
-                # self._grabber = threading.Thread(
-                #     target=self._acquisition_loop, daemon=True)
-                # self._grabber.start()
+                self.latest_frame = None
+                self.running = True
+                self._grabber = threading.Thread(
+                    target=self._acquisition_loop, daemon=True)
+                self._grabber.start()
             except ImportError:
                 configure_path = None
         elif input_mode == "file" and video_source is not None:
@@ -125,6 +128,26 @@ class VideoProcessor:
     def __del__(self):
         """Destructor to clean up resources when the object is garbage collected."""
         self._cleanup_resources()
+
+    def _acquisition_loop(self):
+        h, w = self.camera.image_height_pixels, self.camera.image_width_pixels
+        self.camera.issue_software_trigger()  # queue first exposure
+        while self.running:
+            frame = self.camera.get_pending_frame_or_null()
+            if frame is None:  # no frame ready yet
+                time.sleep(0.0005)  # yield 0.5ms
+                continue
+
+            mono16 = np.frombuffer(frame.image_buffer, np.uint16,
+                                   h * w).reshape(h, w)
+            mono8 = (mono16 >> max(self.camera.bit_depth - 8, 0)).astype(np.uint8)
+
+            qimg = QImage(mono8.data, w, h, w, QImage.Format_Grayscale8)
+            qimg.ndarray_ref = mono8  # keep backing store alive
+            # qimg = qimg.copy()
+            self.latest_frame = qimg  # ← GUI will show this
+
+            self.camera.issue_software_trigger()  # queue next one
 
     def _setup_camera(self):
         """
@@ -182,27 +205,28 @@ class VideoProcessor:
     def get_frame(self):
         """Retrieve a frame from the ThorCam camera, process it into RGB format."""
         if self.input_mode == "live":
-            if self.camera is not None:
-                # self.camera.issue_software_trigger()
-                frame = self.camera.get_pending_frame_or_null()
-                if frame is None:
-                    # queue the *next* exposure right away
-                    self.camera.issue_software_trigger()
-                    return None
-
-                else:
-                    frame.image_buffer
-                    image_buffer_copy = np.copy(frame.image_buffer)
-                    numpy_shaped_image = image_buffer_copy.reshape(self.camera.image_height_pixels,
-                                                                   self.camera.image_width_pixels)
-                    nd_image_array = np.full((self.camera.image_height_pixels, self.camera.image_width_pixels, 3), 0,
-                                             dtype=np.uint8)
-                    nd_image_array[:, :, 0] = numpy_shaped_image
-                    nd_image_array[:, :, 1] = numpy_shaped_image
-                    nd_image_array[:, :, 2] = numpy_shaped_image
-
-                    # self.camera.issue_software_trigger()
-                    return nd_image_array
+            return self.latest_frame
+            # if self.camera is not None:
+            #     # self.camera.issue_software_trigger()
+            #     frame = self.camera.get_pending_frame_or_null()
+            #     if frame is None:
+            #         # queue the *next* exposure right away
+            #         self.camera.issue_software_trigger()
+            #         return None
+            #
+            #     else:
+            #         frame.image_buffer
+            #         image_buffer_copy = np.copy(frame.image_buffer)
+            #         numpy_shaped_image = image_buffer_copy.reshape(self.camera.image_height_pixels,
+            #                                                        self.camera.image_width_pixels)
+            #         nd_image_array = np.full((self.camera.image_height_pixels, self.camera.image_width_pixels, 3), 0,
+            #                                  dtype=np.uint8)
+            #         nd_image_array[:, :, 0] = numpy_shaped_image
+            #         nd_image_array[:, :, 1] = numpy_shaped_image
+            #         nd_image_array[:, :, 2] = numpy_shaped_image
+            #
+            #         # self.camera.issue_software_trigger()
+            #         return nd_image_array
 
         elif self.input_mode == "file":
             ret, frame = self.camera.read()

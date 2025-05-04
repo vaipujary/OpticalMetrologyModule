@@ -285,15 +285,19 @@ class MainWindow(QMainWindow):
             return
         print("frame is not None")
         # Paint the BGR frame into the QLabel
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, _ = rgb.shape
+        if self.ui.videoFeedLabel.pixmap() is None:
+            self.ui.videoFeedLabel.setFixedSize(frame.width(), frame.height())
 
-        # make the label exactly the camera size ONCE
-        if self.ui.videoFeedLabel.width() != w or self.ui.videoFeedLabel.height() != h:
-            self.ui.videoFeedLabel.setFixedSize(w, h)
-
-        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
-        self.ui.videoFeedLabel.setPixmap(QPixmap.fromImage(qimg))
+        self.ui.videoFeedLabel.setPixmap(QPixmap.fromImage(frame))
+        # rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # h, w, _ = rgb.shape
+        #
+        # # make the label exactly the camera size ONCE
+        # if self.ui.videoFeedLabel.width() != w or self.ui.videoFeedLabel.height() != h:
+        #     self.ui.videoFeedLabel.setFixedSize(w, h)
+        #
+        # qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        # self.ui.videoFeedLabel.setPixmap(QPixmap.fromImage(qimg))
 
     def open_video_calibration_dialog(self):
         # Show the dialog (modal, blocks interaction with the main window)
@@ -640,19 +644,31 @@ class VideoCalibrationDialog(QDialog):
 
     def update_video_feed(self):
         """Fetch the video frame from VideoProcessor and display it."""
+
+        if not self.video_processor:
+            return
+
         frame = self.video_processor.get_frame()
 
         if frame is None:
             return
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, _ = rgb.shape
+        # Paint the BGR frame into the QLabel
+        if self.ui.videoLabel.pixmap() is None:
+            self.ui.videoLabel.setFixedSize(frame.width(), frame.height())
 
-        if self.ui.videoLabel.width() != w or self.ui.videoLabel.height() != h:
-            self.ui.videoLabel.setFixedSize(w, h)
+        self.ui.videoLabel.setPixmap(QPixmap.fromImage(frame))
 
-        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
-        self.ui.videoLabel.setPixmap(QPixmap.fromImage(qimg))
+
+
+        # rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # h, w, _ = rgb.shape
+        #
+        # if self.ui.videoLabel.width() != w or self.ui.videoLabel.height() != h:
+        #     self.ui.videoLabel.setFixedSize(w, h)
+        #
+        # qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        # self.ui.videoLabel.setPixmap(QPixmap.fromImage(qimg))
 
     def display_frame(self, frame):
         # Convert OpenCV BGR image to QImage
