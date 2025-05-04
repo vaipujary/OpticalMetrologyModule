@@ -1,7 +1,7 @@
 import json, tempfile, shutil
 import math
 from collections import deque
-
+from tsi_singleton import get_sdk
 import cv2
 import logging
 import numpy as np
@@ -39,7 +39,6 @@ class MainWindow(QMainWindow):
 
         # Camera initialization
         self.camera_dialog = VideoCalibrationDialog(self)
-        # self.graph_window = GraphWindow(self)
         self.calibration_dialog = None
         self.optical_metrology_module = OpticalMetrologyModule(debug=False, parent_ui=self.ui)
 
@@ -62,7 +61,12 @@ class MainWindow(QMainWindow):
 
         self.video_processor: VideoProcessor | None = None
         self.preview_timer = QTimer(self)
+        self.preview_timer.setTimerType(Qt.PreciseTimer)
         self.preview_timer.timeout.connect(self._show_preview_frame)
+
+        self.experiment_timer = QTimer(self)  # will be used later
+        self.experiment_timer.setTimerType(Qt.PreciseTimer)
+        self.ui.startBtn.clicked.connect(self._start_experiment)
 
         # ---- settings-menu widgets (radio buttons + save) ------------
         self.ui.fileRadioBtn.toggled.connect(self._on_radio_changed)  # optional visual feedback
@@ -118,10 +122,10 @@ class MainWindow(QMainWindow):
         self.ui.velocityPlotGraphicsView.setLabel('left', 'Velocity (mm/s)')
         self.ui.velocityPlotGraphicsView.setLabel('bottom', 'Particle ID')
 
-        # Create a timer to update these plots periodically
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_graphs)
-        self.timer.start(500)  # update every 200 ms
+        # # Create a timer to update these plots periodically
+        # self.timer = QTimer()
+        # self.timer.timeout.connect(self.update_graphs)
+        # self.timer.start(500)  # update every 200 ms
 
         # Store the time when we started
         self.start_time = time.time()
@@ -129,6 +133,47 @@ class MainWindow(QMainWindow):
         self.timer2 = QTimer(self)
         self.timer2.timeout.connect(self.update_elapsed_time)
         self.timer2.start(1000)  # 1 second interval
+
+    def _start_experiment(self):
+        if not self.video_processor:
+            QMessageBox.warning(self, "No video source",
+                                "Load a video or connect the camera first.")
+            return
+
+        # Stop the raw preview
+        self.preview_timer.stop()
+
+        # Initialise LK + feature tracking, etc.
+        ok = self.video_processor.initialize_tracking()
+        if not ok:
+            QMessageBox.critical(self, "Error",
+                                 "Could not initialise particle tracking.")
+            return
+
+        # Every timeout now calls the overlay/measurement pipeline
+        self.experiment_timer.timeout.disconnect() if self.experiment_timer.receivers(
+            self.experiment_timer.timeout) else None
+        self.experiment_timer.timeout.connect(self._show_experiment_frame)
+        gui_fps = 30
+        self.experiment_timer.setInterval(int(1000 / gui_fps))
+        self.experiment_timer.start()
+        # period_ms = int(1000 / 165.5)
+        # self.experiment_timer.start(period_ms)  # or e.g. 30 ms
+
+    def _show_experiment_frame(self):
+        frame = self.video_processor.process_frame()  # with trajectories
+        if frame is None:  # end of file, camera error…
+            self.experiment_timer.stop()
+            return
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, _ = rgb.shape
+        qimg = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg).scaled(
+            self.ui.videoFeedLabel.size(),
+            Qt.KeepAspectRatio,
+            Qt.SmoothTransformation)
+        self.ui.videoFeedLabel.setPixmap(pix)
 
     def _save_general_settings(self):
         """Persist checkbox + experiment duration to config.json."""
@@ -201,6 +246,9 @@ class MainWindow(QMainWindow):
             self.preview_timer.stop()
             self.video_processor = None
 
+        cfg = self._read_config()
+        save_data = cfg.get("save_data_enabled", False)
+
         if input_mode == "file":
             video_path, _ = QFileDialog.getOpenFileName(
                 self, "Choose video file", "", "Videos (*.mp4 *.avi *.mov)")
@@ -210,15 +258,18 @@ class MainWindow(QMainWindow):
             self.video_processor = VideoProcessor(
                 ui_video_label=self.ui.videoFeedLabel,
                 input_mode="file",
-                video_source=video_path)
+                video_source=video_path,
+                save_data_enabled=save_data)
 
         else:  # live
+
             self.video_processor = VideoProcessor(
                 ui_video_label=self.ui.videoFeedLabel,
-                input_mode="live")
+                input_mode="live",
+                save_data_enabled=save_data)
 
         # Immediately begin the raw preview (no tracking yet)
-        self.preview_timer.start(0)
+        self.preview_timer.start(6)
 
     def _show_preview_frame(self):
         if not self.video_processor:
@@ -226,11 +277,9 @@ class MainWindow(QMainWindow):
 
         frame = self.video_processor.get_frame()
         if frame is None:
-            # End of file or camera error
-            self.preview_timer.stop()
-            self.ui.videoFeedLabel.setText("Preview stopped.")
+            print("frame is None")
             return
-
+        print("frame is not None")
         # Paint the BGR frame into the QLabel
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, _ = rgb.shape
@@ -444,13 +493,20 @@ class VideoCalibrationDialog(QDialog):
 
         # If a camera is connected, initialize live video feed
         if self.camera_connected:
-            self.video_processor = VideoProcessor(self.ui.videoLabel)
-            self.start_video_feed()
+            self.video_processor = VideoProcessor(self.ui.videoLabel, input_mode="live")
+# --- dedicated GUI timer: ------------------------------------------
+            self.update_timer = QTimer(self)
+            self.update_timer.setTimerType(Qt.PreciseTimer)
+            self.update_timer.timeout.connect(self.update_video_feed)
+            self.update_timer.start(33)
+            # self.video_processor = VideoProcessor(self.ui.videoLabel, input_mode="live")
+            # self.start_video_feed()
+
         else:
             self.display_no_camera_message()
 
         # Timer for periodic video feed updates
-        self.timer = QTimer(self)
+        #self.timer = QTimer(self)
 
         self.imported_image_path = None  # Store the path of the imported image
 
@@ -496,14 +552,14 @@ class VideoCalibrationDialog(QDialog):
     def check_camera_connection(self):
         """Check if a ThorLabs camera is connected."""
         try:
-            with TLCameraSDK() as sdk:
-                available_cameras = sdk.discover_available_cameras()
-                if len(available_cameras) > 0:
-                    print(f"Camera(s) detected: {available_cameras}")
-                    return True  # Camera is connected
-                else:
-                    print("No cameras detected.")
-                    return False  # No camera found
+            sdk = get_sdk()
+            available_cameras = sdk.discover_available_cameras()
+            if len(available_cameras) > 0:
+                print(f"Camera(s) detected: {available_cameras}")
+                return True  # Camera is connected
+            else:
+                print("No cameras detected.")
+                return False  # No camera found
         except Exception as e:
             print(f"Error checking camera connection: {e}")
             return False  # Error indicates no connection
@@ -576,16 +632,16 @@ class VideoCalibrationDialog(QDialog):
         # Set the scaled pixmap to the videoLabel
         self.ui.videoLabel.setPixmap(self.scaled_pixmap)
 
-    def start_video_feed(self):
-        self.timer = self.startTimer(6)  # Timer event updates every 6ms
-
-    def stop_video_feed(self):
-        """Stop the QTimer to pause video feed."""
-        self.timer.stop()
+    # def start_video_feed(self):
+    #     self.timer = self.startTimer(6)  # Timer event updates every 6ms
+    #
+    # def stop_video_feed(self):
+    #     """Stop the QTimer to pause video feed."""
+    #     self.timer.stop()
 
     def update_video_feed(self):
         """Fetch the video frame from VideoProcessor and display it."""
-        frame = self.video_processor.track_particles()
+        frame = self.video_processor.get_frame()
         if frame is not None:
             # Convert OpenCV frame to QImage
             rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -597,13 +653,13 @@ class VideoCalibrationDialog(QDialog):
             # Display the pixmap on videoLabel
             self.ui.videoLabel.setPixmap(pixmap)
 
-    def timer_event(self, event):
-        if not self.screenshot_captured:
-            # Capture live feed frame
-            ret, frame = self.video_capture.read()
-            if ret:
-                self.current_frame = frame
-                self.display_frame(frame)
+    # def timer_event(self, event):
+    #     if not self.screenshot_captured:
+    #         # Capture live feed frame
+    #         ret, frame = self.video_capture.read()
+    #         if ret:
+    #             self.current_frame = frame
+    #             self.display_frame(frame)
 
     def display_frame(self, frame):
         # Convert OpenCV BGR image to QImage
@@ -617,7 +673,8 @@ class VideoCalibrationDialog(QDialog):
     def capture_screenshot(self):
         if self.current_frame is not None:
             self.screenshot_captured = True  # Stop live feed
-            self.killTimer(self.timer)  # Stop updating the video feed
+            self.update_timer.stop()
+            # self.killTimer(self.timer)  # Stop updating the video feed
             # Convert OpenCV frame to QPixmap
             rgb_image = cv2.cvtColor(self.current_frame, cv2.COLOR_BGR2RGB)
             h, w, ch = rgb_image.shape
@@ -753,8 +810,10 @@ class VideoCalibrationDialog(QDialog):
         """Handle dialog close to ensure resources are cleaned up."""
         try:
             # Stop the video feed resources if it's running
-            if hasattr(self, "timer") and self.timer.isActive():
-                self.timer.stop()  # Stop the video feed updates
+            # if hasattr(self, "timer") and self.timer.isActive():
+            #     self.timer.stop()  # Stop the video feed updates
+            if hasattr(self, "update_timer") and self.update_timer.isActive():
+                self.update_timer.stop()
             if hasattr(self, "video_processor") and self.video_processor is not None:
                 self.video_processor.camera.release()  # Release the camera resources
 
@@ -772,244 +831,6 @@ class VideoCalibrationDialog(QDialog):
             print(f"Error while closing the VideoCalibrationDialog: {e}")
             event.accept()  # Fallback: Close dialog if cleanup fails
 
-class RealTimeVideoProcessor:
-    def __init__(self, ui_video_label):
-        self.ui_video_label = ui_video_label
-
-        # Open video (can be from camera or file)
-        self.cam = cv2.VideoCapture('Test Data/Videos/video1.mp4')
-        if not self.cam.isOpened():
-            raise ValueError("Error opening the video file or stream.")
-
-        self.mask = None
-        self.old_gray = None
-        self.p0 = None  # Will store feature points
-        self.frame_count = 0
-
-        # --- Particle Tracking Data ---
-        # Dictionary to store each particle's trajectory: {pid: deque of (x,y)}
-        self.trajectories = {}
-        # Maps (x, y) => pid for identifying which particle a point belongs to
-        self.id_mapping = {}
-        # Next available unique Particle ID
-        self.next_particle_id = 0
-        # Track how many consecutive frames each pid has been lost
-        self.lost_counts = {}
-        # Maximum stored trajectory length
-        self.trajectory_length = 30
-
-        # LK parameters (matching your particle_tracking approach)
-        self.lk_params = dict(winSize=(20, 20),
-                              maxLevel=4,
-                              criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.03))
-
-        # GoodFeaturesToTrack parameters (matching your particle_tracking approach)
-        self.feature_params = dict(maxCorners=50,
-                                   qualityLevel=0.4,
-                                   minDistance=300,
-                                   blockSize=7)
-
-    def initialize_tracking(self):
-        """Reads the first frame, creates initial mask, and does first feature detection."""
-        ret, old_frame = self.cam.read()
-        if not ret:
-            print("Error reading the first frame from the video file.")
-            return False
-
-        self.old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
-        self.mask = np.zeros_like(old_frame)
-
-        # Detect initial features
-        self.p0 = cv2.goodFeaturesToTrack(self.old_gray, mask=None, **self.feature_params)
-        if self.p0 is not None:
-            # Assign new PIDs to the initial set of points
-            for pt in self.p0:
-                x, y = pt.ravel()
-                particle_id = self.next_particle_id
-                self.next_particle_id += 1
-                # Start a new trajectory (use deque with maxlen)
-                self.trajectories[particle_id] = deque(maxlen=self.trajectory_length)
-                self.trajectories[particle_id].append((x, y))
-                # Map the coordinates to the particle ID
-                self.id_mapping[(x, y)] = particle_id
-                # Initialize lost-count to 0
-                self.lost_counts[particle_id] = 0
-
-        return True
-
-    def process_frame(self):
-        """Grab a new frame, run optical flow + re-detection, return the combined overlay."""
-        ret, frame = self.cam.read()
-        if not ret or frame is None:
-            print("Video processing complete (no more frames).")
-            return None
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        # Clear (reset) the overlay each iteration
-        self.mask.fill(0)
-
-        # Step A: Mark all known particles as "lost" until they are recovered
-        for pid in list(self.lost_counts.keys()):
-            self.lost_counts[pid] += 1
-
-        # Step B: If we have old points, apply Lucas-Kanade optical flow
-        new_p0 = []
-        new_id_mapping = {}
-        if self.p0 is not None:
-            p1, st, err = cv2.calcOpticalFlowPyrLK(
-                self.old_gray, gray, self.p0, None, **self.lk_params
-            )
-            if p1 is not None:
-                for i, (new, old) in enumerate(zip(p1, self.p0)):
-                    a, b = new.ravel()
-                    c, d = old.ravel()
-
-                    # If old position is recognized, track continuity
-                    if (c, d) in self.id_mapping:
-                        pid = self.id_mapping[(c, d)]
-                        new_id_mapping[(a, b)] = pid
-
-                    # If the flow is valid, keep the new point
-                    particle_id = self.id_mapping.get((c, d))
-                    if particle_id is not None and st[i, 0] == 1:
-                        new_id_mapping[(a, b)] = particle_id
-                        new_p0.append(new)
-
-                        # Update that particle's trajectory
-                        if particle_id not in self.trajectories:
-                            self.trajectories[particle_id] = deque(maxlen=self.trajectory_length)
-                        self.trajectories[particle_id].append((a, b))
-
-                        # Reset lost count (we're still seeing it)
-                        self.lost_counts[particle_id] = 0
-
-                        # Draw the trajectory lines
-                        pts = list(self.trajectories[particle_id])
-                        for k in range(1, len(pts)):
-                            pt1 = pts[k - 1]
-                            pt2 = pts[k]
-                            cv2.line(self.mask,
-                                     (int(pt1[0]), int(pt1[1])),
-                                     (int(pt2[0]), int(pt2[1])),
-                                     (0, 255, 0), 1)
-
-            # Update p0 and ID mapping
-            self.p0 = np.array(new_p0).reshape(-1, 1, 2) if new_p0 else None
-            self.id_mapping = new_id_mapping
-
-        # Step C: Periodically re-detect new features (or if p0 is empty)
-        if self.frame_count % 10 == 0 or self.p0 is None:
-            kernel = np.ones((5, 5), np.uint8)
-            tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel)
-            _, binary = cv2.threshold(tophat, 100, 255, cv2.THRESH_BINARY)
-
-            new_features = cv2.goodFeaturesToTrack(binary, mask=None, **self.feature_params)
-            if new_features is not None:
-                threshold_dist = 5.0
-                for new in new_features:
-                    a, b = new.ravel()
-                    existing_id = None
-
-                    # Check if this new point is near an already-tracked point
-                    for (old_x, old_y), stored_pid in self.id_mapping.items():
-                        dx = old_x - a
-                        dy = old_y - b
-                        dist_sq = dx*dx + dy*dy
-                        if dist_sq < (threshold_dist * threshold_dist):
-                            existing_id = stored_pid
-                            break
-
-                    if existing_id is not None:
-                        # Already tracked => just update our mapping so (a, b) is the same PID
-                        self.id_mapping[(a, b)] = existing_id
-                        if self.p0 is not None:
-                            self.p0 = np.vstack((self.p0, new.reshape(-1, 1, 2)))
-                        else:
-                            self.p0 = new.reshape(-1, 1, 2)
-
-                    else:
-                        # It's a brand-new point => assign a new PID
-                        pid = self.next_particle_id
-                        self.next_particle_id += 1
-                        self.trajectories[pid] = deque(maxlen=self.trajectory_length)
-                        self.trajectories[pid].append((a, b))
-                        self.id_mapping[(a, b)] = pid
-                        # Also initialize lost_count for the new PID
-                        self.lost_counts[pid] = 0
-
-                        if self.p0 is not None:
-                            self.p0 = np.vstack((self.p0, new.reshape(-1, 1, 2)))
-                        else:
-                            self.p0 = new.reshape(-1, 1, 2)
-
-        # Step D: Remove particles that are "lost" too long
-        for pid in list(self.lost_counts.keys()):
-            if self.lost_counts[pid] > 50:
-                # Remove from trajectories
-                if pid in self.trajectories:
-                    del self.trajectories[pid]
-                # Remove from id_mapping
-                to_remove = []
-                for (x, y), stored_pid in self.id_mapping.items():
-                    if stored_pid == pid:
-                        to_remove.append((x, y))
-                for point in to_remove:
-                    del self.id_mapping[point]
-                # Finally remove from lost_counts
-                del self.lost_counts[pid]
-
-        # Step E: Combine the frame with the mask to visualize trajectories
-        combined = cv2.add(frame, self.mask)
-
-        # Update old_gray for next iteration
-        self.old_gray = gray.copy()
-
-        self.frame_count += 1
-
-        return combined
-
-# def main():
-#     app = QApplication(sys.argv)
-#     try:
-#         window = MainWindow()
-#
-#         # Create the modified processor (with ID-based tracking)
-#         video_processor = RealTimeVideoProcessor(window.ui.videoFeedLabel)
-#         if not video_processor.initialize_tracking():
-#             sys.exit(1)
-#
-#         window.show()
-#
-#         # Process video frame by frame via timer
-#         timer = QTimer()
-#         def update_video():
-#             processed_frame = video_processor.process_frame()
-#             if processed_frame is None:
-#                 timer.stop()
-#                 return
-#
-#             label_width = window.ui.videoFeedLabel.width()
-#             label_height = window.ui.videoFeedLabel.height()
-#
-#             rgb_frame = cv2.cvtColor(processed_frame, cv2.COLOR_BGR2RGB)
-#             resized_frame = cv2.resize(rgb_frame, (label_width, label_height), interpolation=cv2.INTER_AREA)
-#
-#             qt_image = QImage(resized_frame.data,
-#                               resized_frame.shape[1],
-#                               resized_frame.shape[0],
-#                               resized_frame.strides[0],
-#                               QImage.Format_RGB888)
-#             pixmap = QPixmap.fromImage(qt_image)
-#             window.ui.videoFeedLabel.setPixmap(pixmap)
-#
-#         timer.timeout.connect(update_video)
-#         timer.start(6)
-#
-#         sys.exit(app.exec_())
-#
-#     except Exception as e:
-#         print(f"An error occurred: {e}")
 
 def main():
     app = QApplication(sys.argv)
